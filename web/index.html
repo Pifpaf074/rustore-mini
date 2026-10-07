@@ -63,6 +63,7 @@
     display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
   }
   .ibtn:active { transform: scale(.94); }
+  .ibtn.sm { width: 34px; height: 34px; font-size: 15px; border-radius: 10px; color: var(--fg); }
   .tabs { display: flex; gap: 6px; padding: 0 12px 10px; }
   .tab {
     flex: 1; border: 0; background: transparent; color: var(--muted);
@@ -80,11 +81,12 @@
 
   .seg {
     display: flex; gap: 4px; margin: 8px 12px 6px; padding: 4px;
-    background: var(--chip); border-radius: 12px; width: fit-content;
+    background: var(--chip); border-radius: 12px;
   }
   .segbtn {
+    flex: 1; text-align: center;
     border: 0; background: transparent; color: var(--muted);
-    padding: 7px 14px; border-radius: 9px; font-size: 13px; font-weight: 600; cursor: pointer;
+    padding: 8px 10px; border-radius: 9px; font-size: 13px; font-weight: 600; cursor: pointer;
   }
   .segbtn.on { background: var(--card); color: var(--fg); box-shadow: var(--shadow); }
 

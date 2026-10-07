@@ -76,11 +76,16 @@ async function pool(items, size, fn) {
 }
 
 const canNative = () => !!(window.Native && window.Native.installApk);
+// Hail (freeze-менеджер) — публичный API через экспортированную ApiActivity.
+const hailOk = () => !!(window.Native && window.Native.hailAvailable && window.Native.hailAvailable());
+function hail(action, pkg) { const N = window.Native; return !!(N && N.hail && N.hail(action, pkg)); }
+const isFrozen = (a) => !!(a && (a.enabled === false || a.suspended === true));
+const sleep = (ms) => new Promise(function (r) { setTimeout(r, ms); });
 const TABS = [{ id: 'apps', label: 'Приложения' }, { id: 'games', label: 'Игры' }, { id: 'upd', label: 'Обновления' }];
 
 // ------------------------------------------------------------------ состояние
 const ST = data({
-  tab: 'apps',
+  tab: 'upd',
   themeMode: savedThemeMode(),
   sysTheme: (document.documentElement.classList.contains('dark') ? 'dark' : 'light'),
   theme: (document.documentElement.classList.contains('dark') ? 'dark' : 'light'),
@@ -166,7 +171,8 @@ function hardReload() {
   if (N && N.clearCache) N.clearCache();
   setTimeout(function () { location.reload(); }, 350);
 }
-function launch(pkg) {
+function launch(pkg, frozen) {
+  if (frozen && hailOk() && hail('LAUNCH', pkg)) return; // Hail сам разморозит и запустит
   const N = window.Native;
   if (N && N.launchApp) { if (!N.launchApp(pkg)) toast('Не удалось открыть'); }
   else toast('Только внутри приложения');
@@ -208,7 +214,7 @@ function closeDetail() {
 // --- история для аппаратной кнопки «Назад» (нативный onBackPressed → goBack) ---
 // JS видит back только как popstate, а popstate возможен лишь при наличии записи
 // в истории. Держим ровно один «сторожевой» pushState и свой стек состояний.
-const NAV0 = { tab: 'apps', detail: null };
+const NAV0 = { tab: 'upd', detail: null };
 let navStack = [];
 let navArmed = false;
 function hasBackTarget() { return navStack.length > 0 || searchActive(); }
@@ -381,13 +387,23 @@ async function doDownload(i) {
 }
 
 // ------------------------------------------------------------------ обновления
-function loadInstalled() {
+function refreshInstalled() {
   const N = window.Native;
   if (!N || !N.installedApps) return;
   try {
     const me = (N.appInfo() || {}).packageName;
     ST.installed = (N.installedApps() || []).filter(a => a.packageName !== me && !a.packageName.endsWith('.webtoapk'));
   } catch (e) { ST.installed = []; }
+}
+function loadInstalled() { refreshInstalled(); }
+// Заморозить/разморозить через Hail (работает асинхронно — перечитываем список позже).
+function toggleFrozen(a) {
+  if (!hailOk()) { toast('Hail не установлен'); return; }
+  const fr = isFrozen(a);
+  if (hail(fr ? 'UNFREEZE' : 'FREEZE', a.packageName)) {
+    toast(fr ? 'Разморозка…' : 'Заморозка…');
+    setTimeout(function () { refreshInstalled(); if (ST.tab === 'upd' && ST.updTab === 'upd') checkUpdates(); }, 1600);
+  } else toast('Hail недоступен');
 }
 async function checkUpdates() {
   const N = window.Native;
@@ -421,7 +437,9 @@ const updAllReady = () => !!(ST.updates && ST.updates.some(x => x.compatible));
 async function updateOne(it, btn) {
   if (!it || !it.compatible) return;
   if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  const wasFrozen = isFrozen(it.a) && hailOk();
   try {
+    if (wasFrozen) { hail('UNFREEZE', it.a.packageName); await sleep(900); }
     const d = await downloadLink(it.v.appId, false);
     const u = (d.downloadUrls || [])[0];
     if (!u) throw new Error(it.v.aggregatorInfo ? 'внешний источник — нет прямого APK' : 'RuStore не отдал ссылку');
@@ -429,10 +447,12 @@ async function updateOne(it, btn) {
       url: safeUrl(u.url), size: u.size, signer: d.signature, name: it.a.packageName + '.apk',
       onProgress: function (got, total) { if (btn) btn.textContent = total ? Math.round(got / total * 100) + '%' : '…'; },
     });
+    if (wasFrozen) { await sleep(1500); hail('FREEZE', it.a.packageName); }
     toast((it.a.label || it.a.packageName) + ' обновлён');
     ST.updates = (ST.updates || []).filter(x => x.a.packageName !== it.a.packageName);
   } catch (e) {
     toast('Ошибка: ' + e.message);
+    if (wasFrozen) hail('FREEZE', it.a.packageName);
     if (btn) { btn.disabled = false; btn.textContent = 'Обновить'; }
   }
 }
@@ -675,7 +695,7 @@ const UPDATESVIEW = memo(() => {
 });
 
 const UPDROW = memo((it) => {
-  DIV({ class: 'rcard' }) {
+  DIV({ class: 'rcard', onClick: () => openApp(it.a.packageName) }) {
     DIV({ class: 'rct' }) {
       DIV({ class: 'cname' }, it.a.label || it.a.packageName);
       DIV({ class: 'cpkg' }, it.a.packageName);
@@ -684,8 +704,9 @@ const UPDROW = memo((it) => {
         SPAN({ class: 'acc' }, (it.v.versionName || '') + ' (' + it.v.versionCode + ')');
       }
       if (!it.compatible) DIV({ class: 'bad' }, 'другая подпись — обновление недоступно');
+      else if (isFrozen(it.a)) DIV({ class: 'bad' }, '❄ заморожено — разморозим при обновлении');
     }
-    if (it.compatible) BUTTON({ class: 'primary small', onClick: (e) => updateOne(it, e.currentTarget) }, 'Обновить');
+    if (it.compatible) BUTTON({ class: 'primary small', onClick: (e) => { e.stopPropagation(); updateOne(it, e.currentTarget); } }, 'Обновить');
     else BUTTON({ class: 'ghost small', disabled: true }, 'Недоступно');
   }
 });
@@ -705,15 +726,18 @@ const INSTALLEDVIEW = memo(() => {
 });
 
 const IROW = memo((a) => {
+  const fr = isFrozen(a);
   DIV({ class: 'rcard' }) {
     DIV({ class: 'avt' }, (a.label || a.packageName || '?').trim().charAt(0).toUpperCase());
     DIV({ class: 'rct' }) {
       DIV({ class: 'cname' }, a.label || a.packageName);
       DIV({ class: 'cpkg' }, a.packageName + (a.versionName ? '  ·  ' + a.versionName : ''));
+      if (fr) DIV({ class: 'bad' }, '❄ заморожено');
     }
     DIV({ class: 'iact' }) {
-      BUTTON({ class: 'ghost small', onClick: () => launch(a.packageName) }, 'Открыть');
-      BUTTON({ class: 'ghost small', onClick: () => openExt('package:' + a.packageName) }, 'Сведения');
+      BUTTON({ class: 'ibtn sm', title: 'Открыть', onClick: () => launch(a.packageName, fr) }, '▶');
+      if (hailOk()) BUTTON({ class: 'ibtn sm', title: fr ? 'Разморозить' : 'Заморозить', onClick: () => toggleFrozen(a) }, fr ? '☀' : '❄');
+      BUTTON({ class: 'ibtn sm', title: 'Сведения', onClick: () => openExt('package:' + a.packageName) }, 'ⓘ');
     }
   }
 });
@@ -829,6 +853,7 @@ const TOASTBAR = memo(() => {
 // ------------------------------------------------------------------ старт
 applyTheme();
 loadHome('APPS');
+ensureUpdData();
 checkSelfUpdate();
 checkWebUpdate();
 mount(document.getElementById('root'), APP);
