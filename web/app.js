@@ -54,7 +54,9 @@ async function getNew(path) {
 }
 const search = (q, page, size) =>
   api('/applicationData/apps?pageNumber=' + (page || 0) + '&pageSize=' + (size || 20) + '&query=' + encodeURIComponent(q));
-const info = pkg => apiH('/applicationData/overallInfo/' + encodeURIComponent(pkg));
+// overallInfo требует заголовок RuStoreVerCode, но его добавляет нативный слой
+// (перехват в shouldInterceptRequest) — из JS шлём без заголовка, без preflight.
+const info = pkg => api('/applicationData/overallInfo/' + encodeURIComponent(pkg));
 const comments = (pkg, page, size) =>
   api('/comment/comment?packageName=' + encodeURIComponent(pkg) + '&sortBy=NEW_FIRST&pageNumber=' + (page || 0) + '&pageSize=' + (size || 10));
 const stars = n => { n = Math.max(0, Math.min(5, Number(n) || 0)); return '★★★★★'.slice(0, n) + '☆☆☆☆☆'.slice(0, 5 - n); };
@@ -84,6 +86,16 @@ async function pool(items, size, fn) {
   let i = 0;
   const worker = async () => { while (i < items.length) { const k = i++; await fn(items[k]); } };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(size, items.length || 1)) }, worker));
+}
+// overallInfo с ретраями: CORS-preflight иногда отваливается (сервер не отдаёт ACAO).
+async function infoRetry(pkg, times) {
+  const n = times || 3;
+  let last;
+  for (let i = 0; i < n; i++) {
+    try { return await info(pkg); }
+    catch (e) { last = e; if (!netError(e)) throw e; if (i < n - 1) await sleep(250 * (i + 1)); }
+  }
+  throw last;
 }
 
 const canNative = () => !!(window.Native && window.Native.installApk);
@@ -385,6 +397,7 @@ async function doDownload(i) {
       await window.Native.installApk({
         url: url, size: u.size, signer: d.signature, name: i.packageName + '-' + i.versionCode + '.apk',
         onProgress: function (got, total) { ST.dlLabel = total ? Math.round(got / total * 100) + '%' : mb(got); },
+        onPending: function () { ST.dlLabel = 'Разверните приложение'; toast('Скачано — вернитесь в приложение для установки'); },
       });
       toast('Установщик открыт');
     } else {
@@ -437,9 +450,9 @@ async function checkUpdates() {
     ST.installed = apps;
     let done = 0, netFail = 0;
     const found = [];
-    await pool(apps, 6, async function (a) {
+    await pool(apps, 4, async function (a) {
       let v = null;
-      try { v = await info(a.packageName); }
+      try { v = await infoRetry(a.packageName, 3); }
       catch (e) { if (netError(e)) netFail++; /* иначе — просто нет в RuStore */ }
       if (v && Number(v.versionCode) > Number(a.versionCode)) {
         let compatible = true;
@@ -472,6 +485,7 @@ async function updateOne(it, btn) {
       url: safeUrl(u.url), size: u.size, signer: d.signature, name: it.a.packageName + '.apk',
       onPermission: function () { if (btn) btn.textContent = 'Разрешите…'; },
       onProgress: function (got, total) { if (btn) btn.textContent = total ? Math.round(got / total * 100) + '%' : '…'; },
+      onPending: function () { if (btn) btn.textContent = 'Разверните'; toast('Скачано — вернитесь в приложение для установки'); },
     });
     await sleep(700);
     const now = window.Native.installedVersion ? Number(window.Native.installedVersion(it.a.packageName)) : -1;
@@ -913,4 +927,12 @@ loadHome('APPS');
 ensureUpdData();
 checkSelfUpdate();
 checkWebUpdate();
+// Разрешение на уведомления — чтобы видеть прогресс фоновой загрузки (спрашиваем один раз).
+try {
+  const N0 = window.Native;
+  if (N0 && N0.hasNotifications && N0.requestNotifications && !N0.hasNotifications() && !localStorage.getItem('rs_notif_asked')) {
+    localStorage.setItem('rs_notif_asked', '1');
+    N0.requestNotifications();
+  }
+} catch (e) {}
 mount(document.getElementById('root'), APP);
