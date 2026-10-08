@@ -102,7 +102,11 @@ const canNative = () => !!(window.Native && window.Native.installApk);
 // Hail (freeze-менеджер) — публичный API через экспортированную ApiActivity.
 const hailOk = () => !!(window.Native && window.Native.hailAvailable && window.Native.hailAvailable());
 function hail(action, pkg) { const N = window.Native; return !!(N && N.hail && N.hail(action, pkg)); }
-const isFrozen = (a) => !!(a && (a.enabled === false || a.suspended === true));
+// Приложение выключено/приостановлено — но это НЕ обязательно Hail: так же выглядят
+// отключённые системные приложения и «заморозка» прошивки (ColorOS и т.п.).
+const isDisabled = (a) => !!(a && (a.enabled === false || a.suspended === true));
+// «Заморожено» — только если Hail реально установлен, иначе снежинку не показываем.
+const isFrozen = (a) => hailOk() && isDisabled(a);
 const sleep = (ms) => new Promise(function (r) { setTimeout(r, ms); });
 const TABS = [{ id: 'apps', label: 'Приложения' }, { id: 'games', label: 'Игры' }, { id: 'upd', label: 'Обновления' }];
 
