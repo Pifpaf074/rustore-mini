@@ -79,11 +79,13 @@ async function downloadLink(appId, firstInstall) {
   return apiH('/applicationData/v2/download-link', { method: 'POST', body: body });
 }
 // Ссылка на APK из RuStore: новый API с фолбэком на старый. hint — текст ошибки, если ссылки нет.
-async function resolveApk(appId, firstInstall, hint) {
+// download-link НЕ отдаёт подпись, поэтому берём её из overallInfo (sig) — иначе нативная
+// проверка подписи молча пропускается.
+async function resolveApk(appId, firstInstall, hint, sig) {
   const d = await downloadLink(appId, firstInstall);
   const u = (d.downloadUrls || [])[0];
   if (!u) throw new Error(hint || 'RuStore не отдал ссылку');
-  return { url: safeUrl(u.url), size: u.size, signer: d.signature };
+  return { url: safeUrl(u.url), size: u.size, signer: d.signature || sig || null };
 }
 // Единая установка через нативный мост: {url,size,signer} + имя + колбэки фаз.
 function installApk(a, name, cbs) {
@@ -426,7 +428,7 @@ function installState(i) {
 async function doDownload(i) {
   ST.dlBusy = true; ST.dlLabel = 'Получаем ссылку…';
   try {
-    const apk = await resolveApk(i.appId, true, 'RuStore не отдал ссылку (внешний источник?)');
+    const apk = await resolveApk(i.appId, true, 'RuStore не отдал ссылку (внешний источник?)', i.signature);
     if (canNative()) {
       await installApk(apk, i.packageName + '-' + i.versionCode + '.apk', {
         onProgress: function (got, total) { ST.dlLabel = total ? Math.round(got / total * 100) + '%' : mb(got); },
@@ -520,7 +522,7 @@ async function updateOne(it, btn) {
   const label = it.a.label || it.a.packageName;
   try {
     if (wasFrozen) { hail('UNFREEZE', it.a.packageName); await sleep(900); }
-    const apk = await resolveApk(it.v.appId, false, it.v.aggregatorInfo ? 'внешний источник — нет прямого APK' : 'RuStore не отдал ссылку');
+    const apk = await resolveApk(it.v.appId, false, it.v.aggregatorInfo ? 'внешний источник — нет прямого APK' : 'RuStore не отдал ссылку', it.v.signature);
     await installApk(apk, it.a.packageName + '.apk', {
       onPermission: function () { if (btn) btn.textContent = 'Разрешите…'; },
       onProgress: function (got, total) { if (btn) btn.textContent = total ? Math.round(got / total * 100) + '%' : '…'; },
