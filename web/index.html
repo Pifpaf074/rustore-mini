@@ -149,7 +149,16 @@
     display: flex; align-items: center; justify-content: center; font-weight: 800;
   }
   .rct { min-width: 0; flex: 1; }
-  .cname { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cname { font-weight: 650; display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .cname .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .snow {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 19px; height: 19px; border-radius: 6px; background: var(--chip); color: #4aa3ff; font-size: 11px;
+  }
+  .sechead {
+    font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .03em; padding: 12px 14px 4px;
+  }
   .cpkg { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px; }
   .crate { color: #f5b301; font-size: 12px; margin-top: 2px; }
   .muted { color: var(--muted); }

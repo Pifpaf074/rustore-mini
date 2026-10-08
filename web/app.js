@@ -17,11 +17,22 @@ const mb    = n => n ? (n / 1048576).toFixed(1) + ' МБ' : '—';
 const fnum  = n => Number(n || 0).toLocaleString('ru-RU');
 const fdate = s => s ? new Date(s).toLocaleDateString('ru-RU') : '—';
 
+// fetch с таймаутом: без него офлайн запросы висят бесконечно («читаем установленные…»).
+const NET_TIMEOUT = 12000;
+async function fetchT(url, opts) {
+  const ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const o = Object.assign({}, opts || {});
+  if (ctl) o.signal = ctl.signal;
+  const t = setTimeout(function () { if (ctl) ctl.abort(); }, NET_TIMEOUT);
+  try { return await fetch(url, o); } finally { clearTimeout(t); }
+}
+const netError = (e) => /fetch|network|abort|timeout|load failed|failed to load/i.test(String((e && e.message) || e));
+
 // Простые GET без кастомных заголовков (не требуют CORS-preflight).
 async function api(path, opts) {
   const o = Object.assign({}, opts || {});
   if (o.body != null && !o.headers) o.headers = { 'Content-Type': 'application/json' };
-  const r = await fetch(API + path, o);
+  const r = await fetchT(API + path, o);
   const j = await r.json().catch(() => ({}));
   if (!r.ok || (j && j.code && j.code !== 'OK')) throw new Error((j && j.message) || ('HTTP ' + r.status));
   return j.body;
@@ -30,13 +41,13 @@ async function api(path, opts) {
 async function apiH(path, opts) {
   const o = Object.assign({ headers: Object.assign({}, HDR) }, opts || {});
   if (o.body != null && !o.headers['Content-Type']) o.headers['Content-Type'] = 'application/json';
-  const r = await fetch(API + path, o);
+  const r = await fetchT(API + path, o);
   const j = await r.json().catch(() => ({}));
   if (!r.ok || (j && j.code && j.code !== 'OK')) throw new Error((j && j.message) || ('HTTP ' + r.status));
   return j.body;
 }
 async function getNew(path) {
-  const r = await fetch(API_NEW + path);
+  const r = await fetchT(API_NEW + path);
   const j = await r.json().catch(() => ({}));
   if (!r.ok || (j && j.code === 'ERROR')) throw new Error((j && j.message) || ('HTTP ' + r.status));
   return j;
@@ -61,7 +72,7 @@ function devParams() {
 async function downloadLink(appId, firstInstall) {
   const body = JSON.stringify(Object.assign({ appId: appId, firstInstall: !!firstInstall, withoutSplits: true }, devParams()));
   try {
-    const r = await fetch(API_NEW + '/v3/showcase/apps/download-link',
+    const r = await fetchT(API_NEW + '/v3/showcase/apps/download-link',
       { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, HDR), body: body });
     if (r.ok) return await r.json();
   } catch (e) { /* упал -> старый путь */ }
@@ -93,11 +104,11 @@ const ST = data({
   homeLoading: { APPS: false, GAMES: false },
   homeErr: { APPS: '', GAMES: '' },
   query: '', suggests: [], results: null, searching: false,
-  detail: null, detailLoading: false, detailErr: '',
+  detail: null, detailPkg: null, detailLoading: false, detailErr: '',
   comments: null, commentsLoading: false, commentsErr: '', commentsPage: 0, commentsTotal: 0,
   dlBusy: false, dlLabel: '',
   selfUpd: null,
-  updTab: 'upd', updates: null, updChecking: false, updProgress: '',
+  updTab: 'upd', updates: null, updChecking: false, updProgress: '', updErr: '',
   installed: null,
   toast: '',
 });
@@ -315,7 +326,7 @@ async function loadSuggests(q) {
   q = String(q || '').trim();
   if (q.length < 2) { ST.suggests = []; return; }
   try {
-    const r = await fetch(API_WEB + '/v1/showcase/web/search/suggests?query=' + encodeURIComponent(q));
+    const r = await fetchT(API_WEB + '/v1/showcase/web/search/suggests?query=' + encodeURIComponent(q));
     const j = await r.json();
     if (String(ST.query).trim() !== q) return; // устарело
     ST.suggests = (j.suggests || []).slice(0, 8);
@@ -340,7 +351,7 @@ function pickSuggest(s) {
 
 // ------------------------------------------------------------------ карточка приложения
 async function openDetail(pkg) {
-  ST.detail = null; ST.detailErr = ''; ST.detailLoading = true; ST.dlBusy = false; ST.dlLabel = '';
+  ST.detail = null; ST.detailPkg = pkg; ST.detailErr = ''; ST.detailLoading = true; ST.dlBusy = false; ST.dlLabel = '';
   ST.comments = null; ST.commentsLoading = false; ST.commentsErr = ''; ST.commentsPage = 0; ST.commentsTotal = 0;
   try { ST.detail = await info(pkg); }
   catch (e) { ST.detailErr = 'Ошибка: ' + e.message; }
@@ -405,19 +416,31 @@ function toggleFrozen(a) {
     setTimeout(function () { refreshInstalled(); if (ST.tab === 'upd' && ST.updTab === 'upd') checkUpdates(); }, 1600);
   } else toast('Hail недоступен');
 }
+// Системный экран «Информация о приложении» (удаление и пр.).
+function nativeAppInfo(pkg) {
+  const N = window.Native;
+  if (N && N.openAppInfo) N.openAppInfo(pkg);
+  else toast(pkg);
+}
+// Тап по «Установленному»: карточка в RuStore, а если приложения там нет — системные сведения.
+async function openInstalled(a) {
+  try { await info(a.packageName); openApp(a.packageName); }
+  catch (e) { if (netError(e)) toast('Нет сети'); else nativeAppInfo(a.packageName); }
+}
 async function checkUpdates() {
   const N = window.Native;
   if (!canNative()) return;
-  ST.updChecking = true; ST.updProgress = 'Читаем установленные…';
+  ST.updChecking = true; ST.updProgress = 'Читаем установленные…'; ST.updErr = '';
   try {
     const me = (N.appInfo() || {}).packageName;
     const apps = (N.installedApps() || []).filter(a => a.packageName !== me && !a.packageName.endsWith('.webtoapk'));
     ST.installed = apps;
-    let done = 0;
+    let done = 0, netFail = 0;
     const found = [];
     await pool(apps, 6, async function (a) {
       let v = null;
-      try { v = await info(a.packageName); } catch (e) { /* нет в RuStore */ }
+      try { v = await info(a.packageName); }
+      catch (e) { if (netError(e)) netFail++; /* иначе — просто нет в RuStore */ }
       if (v && Number(v.versionCode) > Number(a.versionCode)) {
         let compatible = true;
         if (v.signature && N.installedSigner) {
@@ -430,7 +453,8 @@ async function checkUpdates() {
       ST.updProgress = 'Проверено ' + done + '/' + apps.length;
     });
     ST.updates = found.sort((x, y) => String(x.a.label || '').localeCompare(String(y.a.label || '')));
-  } catch (e) { toast('Ошибка: ' + e.message); ST.updates = []; }
+    ST.updErr = netFail === 0 ? '' : (netFail >= apps.length ? 'Нет соединения с RuStore' : ('Не удалось проверить (сеть): ' + netFail));
+  } catch (e) { toast('Ошибка: ' + e.message); ST.updates = []; ST.updErr = 'Ошибка: ' + e.message; }
   ST.updChecking = false;
 }
 const updAllReady = () => !!(ST.updates && ST.updates.some(x => x.compatible));
@@ -438,6 +462,7 @@ async function updateOne(it, btn) {
   if (!it || !it.compatible) return;
   if (btn) { btn.disabled = true; btn.textContent = '…'; }
   const wasFrozen = isFrozen(it.a) && hailOk();
+  const label = it.a.label || it.a.packageName;
   try {
     if (wasFrozen) { hail('UNFREEZE', it.a.packageName); await sleep(900); }
     const d = await downloadLink(it.v.appId, false);
@@ -445,15 +470,24 @@ async function updateOne(it, btn) {
     if (!u) throw new Error(it.v.aggregatorInfo ? 'внешний источник — нет прямого APK' : 'RuStore не отдал ссылку');
     await window.Native.installApk({
       url: safeUrl(u.url), size: u.size, signer: d.signature, name: it.a.packageName + '.apk',
+      onPermission: function () { if (btn) btn.textContent = 'Разрешите…'; },
       onProgress: function (got, total) { if (btn) btn.textContent = total ? Math.round(got / total * 100) + '%' : '…'; },
     });
-    if (wasFrozen) { await sleep(1500); hail('FREEZE', it.a.packageName); }
-    toast((it.a.label || it.a.packageName) + ' обновлён');
-    ST.updates = (ST.updates || []).filter(x => x.a.packageName !== it.a.packageName);
+    await sleep(700);
+    const now = window.Native.installedVersion ? Number(window.Native.installedVersion(it.a.packageName)) : -1;
+    if (now >= Number(it.v.versionCode)) {
+      ST.updates = (ST.updates || []).filter(x => x.a.packageName !== it.a.packageName);
+      toast(label + ' обновлён');
+    } else {
+      toast('Установка не применилась: ' + label);
+      if (btn) { btn.disabled = false; btn.textContent = 'Обновить'; }
+    }
   } catch (e) {
     toast('Ошибка: ' + e.message);
-    if (wasFrozen) hail('FREEZE', it.a.packageName);
     if (btn) { btn.disabled = false; btn.textContent = 'Обновить'; }
+  } finally {
+    // Вернуть заморозку (даже при ошибке) — если она была.
+    if (wasFrozen) { await sleep(1200); hail('FREEZE', it.a.packageName); }
   }
 }
 async function updateAll() {
@@ -478,7 +512,7 @@ async function checkSelfUpdate() {
   const N = window.Native;
   if (!N || !N.appInfo) return;
   try {
-    const r = await fetch('client/version.json?ts=' + Date.now(), { cache: 'no-store' });
+    const r = await fetchT('client/version.json?ts=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) return;
     const j = await r.json();
     const me = N.appInfo() || {};
@@ -491,7 +525,7 @@ async function checkWebUpdate() {
   const cur = webVer();
   if (!cur || cur === 'dev') return;
   try {
-    const r = await fetch('client/version.json?_=' + Date.now(), { cache: 'no-store' });
+    const r = await fetchT('client/version.json?_=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) return;
     const j = await r.json();
     if (j && j.web && j.web !== cur) hardReload();
@@ -647,7 +681,7 @@ const RCARD = memo((a) => {
     if (a.iconUrl) IMG({ class: 'ric', src: safeUrl(a.iconUrl), loading: 'lazy', referrerpolicy: 'no-referrer', alt: '' });
     else DIV({ class: 'ric ph' }, (a.appName || a.packageName || '?').trim().charAt(0).toUpperCase());
     DIV({ class: 'rct' }) {
-      DIV({ class: 'cname' }, a.appName || a.packageName);
+      DIV({ class: 'cname' }) { SPAN({ class: 'nm' }, a.appName || a.packageName); }
       DIV({ class: 'cpkg' }, a.packageName);
       if (a.averageUserRating) DIV({ class: 'crate' }) {
         EMIT('★ ' + a.averageUserRating);
@@ -684,27 +718,37 @@ const UPDATESVIEW = memo(() => {
       BUTTON({ class: 'primary', disabled: !updAllReady(), onClick: updateAll }, 'Обновить все');
     }
     if (ST.updChecking) DIV({ class: 'hint' }, ST.updProgress || 'Проверяем…');
+    else if (ST.updErr && (!ST.updates || !ST.updates.length)) {
+      DIV({ class: 'hint' }, ST.updErr);
+      DIV({ class: 'mid' }) { BUTTON({ class: 'ghost', onClick: checkUpdates }, 'Повторить') }
+    }
     else if (!ST.updates) DIV({ class: 'hint' }, 'Нажмите «Проверить обновления».');
     else if (!ST.updates.length) DIV({ class: 'hint' }, 'Обновлений нет 🎉');
-    else for (let i = 0; i < ST.updates.length; i++) {
-      const it = ST.updates[i];
-      window.ID = it.a.packageName;
-      UPDROW(it);
+    else {
+      if (ST.updErr) DIV({ class: 'hint' }, ST.updErr);
+      for (let i = 0; i < ST.updates.length; i++) {
+        const it = ST.updates[i];
+        window.ID = it.a.packageName;
+        UPDROW(it);
+      }
     }
   }
 });
 
 const UPDROW = memo((it) => {
+  const fr = isFrozen(it.a);
   DIV({ class: 'rcard', onClick: () => openApp(it.a.packageName) }) {
     DIV({ class: 'rct' }) {
-      DIV({ class: 'cname' }, it.a.label || it.a.packageName);
+      DIV({ class: 'cname' }) {
+        SPAN({ class: 'nm' }, it.a.label || it.a.packageName);
+        if (fr) SPAN({ class: 'snow' }, '❄');
+      }
       DIV({ class: 'cpkg' }, it.a.packageName);
       DIV({ class: 'cver' }) {
         EMIT((it.a.versionName || '') + ' (' + it.a.versionCode + ') → ');
         SPAN({ class: 'acc' }, (it.v.versionName || '') + ' (' + it.v.versionCode + ')');
       }
       if (!it.compatible) DIV({ class: 'bad' }, 'другая подпись — обновление недоступно');
-      else if (isFrozen(it.a)) DIV({ class: 'bad' }, '❄ заморожено — разморозим при обновлении');
     }
     if (it.compatible) BUTTON({ class: 'primary small', onClick: (e) => { e.stopPropagation(); updateOne(it, e.currentTarget); } }, 'Обновить');
     else BUTTON({ class: 'ghost small', disabled: true }, 'Недоступно');
@@ -715,11 +759,16 @@ const INSTALLEDVIEW = memo(() => {
   DIV({ class: 'sub' }) {
     if (!ST.installed) DIV({ class: 'hint' }, 'Загрузка…');
     else {
-      DIV({ class: 'insthead' }, 'Приложений: ' + ST.installed.length);
-      for (let i = 0; i < ST.installed.length; i++) {
-        const a = ST.installed[i];
-        window.ID = a.packageName;
-        IROW(a);
+      const frozen = ST.installed.filter(isFrozen);
+      const normal = ST.installed.filter(a => !isFrozen(a));
+      DIV({ class: 'insthead' }, 'Приложений: ' + ST.installed.length + (frozen.length ? '  ·  заморожено: ' + frozen.length : ''));
+      if (normal.length) {
+        DIV({ class: 'sechead' }, 'Установленные');
+        for (let i = 0; i < normal.length; i++) { window.ID = normal[i].packageName; IROW(normal[i]); }
+      }
+      if (frozen.length) {
+        DIV({ class: 'sechead' }, 'Замороженные (Hail)');
+        for (let i = 0; i < frozen.length; i++) { window.ID = frozen[i].packageName; IROW(frozen[i]); }
       }
     }
   }
@@ -727,31 +776,39 @@ const INSTALLEDVIEW = memo(() => {
 
 const IROW = memo((a) => {
   const fr = isFrozen(a);
-  DIV({ class: 'rcard' }) {
+  DIV({ class: 'rcard', onClick: () => openInstalled(a) }) {
     DIV({ class: 'avt' }, (a.label || a.packageName || '?').trim().charAt(0).toUpperCase());
     DIV({ class: 'rct' }) {
-      DIV({ class: 'cname' }, a.label || a.packageName);
+      DIV({ class: 'cname' }) {
+        SPAN({ class: 'nm' }, a.label || a.packageName);
+        if (fr) SPAN({ class: 'snow' }, '❄');
+      }
       DIV({ class: 'cpkg' }, a.packageName + (a.versionName ? '  ·  ' + a.versionName : ''));
-      if (fr) DIV({ class: 'bad' }, '❄ заморожено');
     }
     DIV({ class: 'iact' }) {
-      BUTTON({ class: 'ibtn sm', title: 'Открыть', onClick: () => launch(a.packageName, fr) }, '▶');
-      if (hailOk()) BUTTON({ class: 'ibtn sm', title: fr ? 'Разморозить' : 'Заморозить', onClick: () => toggleFrozen(a) }, fr ? '☀' : '❄');
-      BUTTON({ class: 'ibtn sm', title: 'Сведения', onClick: () => openExt('package:' + a.packageName) }, 'ⓘ');
+      BUTTON({ class: 'ibtn sm', title: 'Открыть', onClick: (e) => { e.stopPropagation(); launch(a.packageName, fr); } }, '▶');
+      if (fr && hailOk()) BUTTON({ class: 'ibtn sm', title: 'Разморозить', onClick: (e) => { e.stopPropagation(); toggleFrozen(a); } }, '☀');
+      BUTTON({ class: 'ibtn sm', title: 'Сведения', onClick: (e) => { e.stopPropagation(); nativeAppInfo(a.packageName); } }, 'ⓘ');
     }
   }
 });
 
 // ---- карточка приложения (оверлей) ----
 const DETAILVIEW = memo(() => {
-  DIV({ class: 'detail' + (ST.detail || ST.detailLoading ? ' open' : '') }) {
+  DIV({ class: 'detail' + (ST.detail || ST.detailLoading || ST.detailErr ? ' open' : '') }) {
     DIV({ class: 'dhead' }) {
       BUTTON({ class: 'ibtn', onClick: closeDetail }, '✕');
       DIV({ class: 'grow' });
       if (ST.detail) BUTTON({ class: 'ibtn', onClick: () => shareApp(ST.detail) }, '↗');
     }
     if (ST.detailLoading) DIV({ class: 'hint' }, 'Загрузка…');
-    else if (ST.detailErr) DIV({ class: 'hint' }, ST.detailErr);
+    else if (ST.detailErr) {
+      DIV({ class: 'hint' }, ST.detailErr);
+      if (ST.detailPkg) {
+        DIV({ class: 'mid' }) { BUTTON({ class: 'ghost', onClick: () => nativeAppInfo(ST.detailPkg) }, 'Сведения о приложении') }
+        DIV({ class: 'mid' }) { BUTTON({ class: 'ghost', onClick: () => openExt('https://www.rustore.ru/catalog/app/' + ST.detailPkg) }, 'Открыть на сайте') }
+      }
+    }
     else if (ST.detail) DETAILBODY(ST.detail);
   }
 });
