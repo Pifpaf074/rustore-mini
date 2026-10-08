@@ -87,15 +87,30 @@ async function pool(items, size, fn) {
   const worker = async () => { while (i < items.length) { const k = i++; await fn(items[k]); } };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(size, items.length || 1)) }, worker));
 }
-// overallInfo с ретраями: CORS-preflight иногда отваливается (сервер не отдаёт ACAO).
+// overallInfo с ретраями: сервер иногда отдаёт 429/5xx/сетевую ошибку — без ретрая
+// приложение молча выпадает из списка обновлений (отсюда «разный список»).
 async function infoRetry(pkg, times) {
-  const n = times || 3;
+  const n = times || 4;
   let last;
   for (let i = 0; i < n; i++) {
     try { return await info(pkg); }
-    catch (e) { last = e; if (!netError(e)) throw e; if (i < n - 1) await sleep(250 * (i + 1)); }
+    catch (e) {
+      last = e;
+      if (/404/.test(String((e && e.message) || ''))) throw e; // нет в RuStore — не ретраим
+      if (i < n - 1) await sleep(300 * (i + 1));
+    }
   }
   throw last;
+}
+// Кэш info на время проверки: повторные «Проверить» дают стабильный список.
+const UPD_TTL = 5 * 60 * 1000;
+const updCache = {};
+async function infoCached(pkg) {
+  const c = updCache[pkg], now = Date.now();
+  if (c && now - c.ts < UPD_TTL) return c.v;
+  const v = await infoRetry(pkg, 4);
+  updCache[pkg] = { v: v, ts: now };
+  return v;
 }
 
 const canNative = () => !!(window.Native && window.Native.installApk);
@@ -470,9 +485,9 @@ async function checkUpdates() {
     }
     let done = 0, netFail = 0;
     const found = [];
-    await pool(apps, 4, async function (a) {
+    await pool(apps, 3, async function (a) {
       let v = null;
-      try { v = await infoRetry(a.packageName, 3); }
+      try { v = await infoCached(a.packageName); }
       catch (e) { if (netError(e)) netFail++; /* иначе — просто нет в RuStore */ }
       if (v && Number(v.versionCode) > Number(a.versionCode)) {
         let compatible = true;
