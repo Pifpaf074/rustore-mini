@@ -468,9 +468,10 @@ async function openInstalled(a) {
   try { await info(a.packageName); openApp(a.packageName); }
   catch (e) { if (netError(e)) toast('Нет сети'); else nativeAppInfo(a.packageName); }
 }
-async function checkUpdates() {
+async function checkUpdates(force) {
   const N = window.Native;
   if (!canNative()) return;
+  if (force) { for (const k in updCache) delete updCache[k]; } // кнопка «Проверить» — реальный опрос
   ST.updChecking = true; ST.updProgress = 'Читаем установленные…'; ST.updErr = '';
   try {
     const me = (N.appInfo() || {}).packageName;
@@ -488,7 +489,7 @@ async function checkUpdates() {
     await pool(apps, 3, async function (a) {
       let v = null;
       try { v = await infoCached(a.packageName); }
-      catch (e) { if (netError(e)) netFail++; /* иначе — просто нет в RuStore */ }
+      catch (e) { if (!/404/.test(String((e && e.message) || ''))) netFail++; }
       if (v && Number(v.versionCode) > Number(a.versionCode)) {
         let compatible = true;
         if (v.signature && N.installedSigner) {
@@ -526,6 +527,7 @@ async function updateOne(it, btn) {
     const now = window.Native.installedVersion ? Number(window.Native.installedVersion(it.a.packageName)) : -1;
     if (now < 0 || now >= Number(it.v.versionCode)) {
       // now < 0 — версию не прочитать (нет доступа к списку приложений); считаем, что установка прошла.
+      delete updCache[it.a.packageName]; // сбросить кэш info, иначе приложение всплывёт снова
       ST.updates = (ST.updates || []).filter(x => x.a.packageName !== it.a.packageName);
       toast(now < 0 ? (label + ' — установлено (проверить не удалось)') : (label + ' обновлён'));
     } else {
@@ -764,13 +766,13 @@ const SEGUPD = memo((id, label) => {
 const UPDATESVIEW = memo(() => {
   DIV({ class: 'sub' }) {
     DIV({ class: 'updbar' }) {
-      BUTTON({ class: 'ghost', onClick: checkUpdates }, 'Проверить');
+      BUTTON({ class: 'ghost', onClick: () => checkUpdates(true) }, 'Проверить');
       BUTTON({ class: 'primary', disabled: !updAllReady(), onClick: updateAll }, 'Обновить все');
     }
     if (ST.updChecking) DIV({ class: 'hint' }, ST.updProgress || 'Проверяем…');
     else if (ST.updErr && (!ST.updates || !ST.updates.length)) {
       DIV({ class: 'hint' }, ST.updErr);
-      DIV({ class: 'mid' }) { BUTTON({ class: 'ghost', onClick: checkUpdates }, 'Повторить') }
+      DIV({ class: 'mid' }) { BUTTON({ class: 'ghost', onClick: () => checkUpdates(true) }, 'Повторить') }
     }
     else if (!ST.updates) DIV({ class: 'hint' }, 'Нажмите «Проверить обновления».');
     else if (!ST.updates.length) DIV({ class: 'hint' }, 'Обновлений нет 🎉');
