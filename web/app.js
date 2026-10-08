@@ -158,7 +158,7 @@ async function metaFor(pkg) {
   try {
     const b = await search(pkg, 0, 6);
     const list = (b && b.content) || [];
-    const hit = list.find(x => x.packageName === pkg) || list[0];
+    const hit = list.find(x => x.packageName === pkg); // только точное; иначе — чужое приложение
     if (hit) m = {
       appId: hit.appId, packageName: hit.packageName, appName: hit.appName,
       iconUrl: hit.iconUrl, averageUserRating: hit.averageUserRating,
@@ -892,6 +892,10 @@ const DETAILBODY = memo((i) => {
       }
     }
     if (i.shortDescription) DIV({ class: 'desc' }, i.shortDescription);
+    if (i.whatsNew) {
+      DIV({ class: 'sechead' }, 'Что нового');
+      DIV({ class: 'desc' }, i.whatsNew);
+    }
     DIV({ class: 'rows' }) {
       ROW('Пакет', i.packageName);
       ROW('Версия', (i.versionName || '') + ' (' + i.versionCode + ')');
