@@ -29,29 +29,27 @@ async function fetchT(url, opts) {
 const netError = (e) => /fetch|network|abort|timeout|load failed|failed to load/i.test(String((e && e.message) || e));
 
 // Простые GET без кастомных заголовков (не требуют CORS-preflight).
+// Один разбор ответа для всех API. strict: у backapi ошибка — любой code кроме 'OK',
+// у нового API — только 'ERROR'.
+async function jfetch(url, opts, strict) {
+  const r = await fetchT(url, opts);
+  const j = await r.json().catch(() => ({}));
+  const bad = !r.ok || (j && j.code && (strict ? j.code !== 'OK' : j.code === 'ERROR'));
+  if (bad) throw new Error((j && j.message) || ('HTTP ' + r.status));
+  return j;
+}
 async function api(path, opts) {
   const o = Object.assign({}, opts || {});
   if (o.body != null && !o.headers) o.headers = { 'Content-Type': 'application/json' };
-  const r = await fetchT(API + path, o);
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || (j && j.code && j.code !== 'OK')) throw new Error((j && j.message) || ('HTTP ' + r.status));
-  return j.body;
+  return (await jfetch(API + path, o, true)).body;
 }
-// Запросы, где обязателен RuStoreVerCode (overallInfo/download-link) — с preflight.
+// Запросы, где обязателен RuStoreVerCode (download-link) — добавляем заголовок (с preflight).
 async function apiH(path, opts) {
   const o = Object.assign({ headers: Object.assign({}, HDR) }, opts || {});
   if (o.body != null && !o.headers['Content-Type']) o.headers['Content-Type'] = 'application/json';
-  const r = await fetchT(API + path, o);
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || (j && j.code && j.code !== 'OK')) throw new Error((j && j.message) || ('HTTP ' + r.status));
-  return j.body;
+  return (await jfetch(API + path, o, true)).body;
 }
-async function getNew(path) {
-  const r = await fetchT(API_NEW + path);
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || (j && j.code === 'ERROR')) throw new Error((j && j.message) || ('HTTP ' + r.status));
-  return j;
-}
+async function getNew(path) { return jfetch(API_NEW + path, null, false); }
 const search = (q, page, size) =>
   api('/applicationData/apps?pageNumber=' + (page || 0) + '&pageSize=' + (size || 20) + '&query=' + encodeURIComponent(q));
 // overallInfo требует заголовок RuStoreVerCode, но его добавляет нативный слой
@@ -79,6 +77,17 @@ async function downloadLink(appId, firstInstall) {
     if (r.ok) return await r.json();
   } catch (e) { /* упал -> старый путь */ }
   return apiH('/applicationData/v2/download-link', { method: 'POST', body: body });
+}
+// Ссылка на APK из RuStore: новый API с фолбэком на старый. hint — текст ошибки, если ссылки нет.
+async function resolveApk(appId, firstInstall, hint) {
+  const d = await downloadLink(appId, firstInstall);
+  const u = (d.downloadUrls || [])[0];
+  if (!u) throw new Error(hint || 'RuStore не отдал ссылку');
+  return { url: safeUrl(u.url), size: u.size, signer: d.signature };
+}
+// Единая установка через нативный мост: {url,size,signer} + имя + колбэки фаз.
+function installApk(a, name, cbs) {
+  return window.Native.installApk(Object.assign({ url: a.url, size: a.size, signer: a.signer, name: name }, cbs || {}));
 }
 
 // Параллельный обход с ограничением.
@@ -417,20 +426,16 @@ function installState(i) {
 async function doDownload(i) {
   ST.dlBusy = true; ST.dlLabel = 'Получаем ссылку…';
   try {
-    const d = await downloadLink(i.appId, true);
-    const u = (d.downloadUrls || [])[0];
-    if (!u) throw new Error('RuStore не отдал ссылку (внешний источник?)');
-    const url = safeUrl(u.url);
+    const apk = await resolveApk(i.appId, true, 'RuStore не отдал ссылку (внешний источник?)');
     if (canNative()) {
-      await window.Native.installApk({
-        url: url, size: u.size, signer: d.signature, name: i.packageName + '-' + i.versionCode + '.apk',
+      await installApk(apk, i.packageName + '-' + i.versionCode + '.apk', {
         onProgress: function (got, total) { ST.dlLabel = total ? Math.round(got / total * 100) + '%' : mb(got); },
         onPending: function () { ST.dlLabel = 'Разверните приложение'; toast('Скачано — вернитесь в приложение для установки'); },
       });
       toast('Установщик открыт');
     } else {
       const a = document.createElement('a');
-      a.href = url; a.rel = 'noopener'; a.download = '';
+      a.href = apk.url; a.rel = 'noopener'; a.download = '';
       document.body.appendChild(a); a.click(); a.remove();
       toast('Загрузка началась');
     }
@@ -439,14 +444,16 @@ async function doDownload(i) {
 }
 
 // ------------------------------------------------------------------ обновления
-function refreshInstalled() {
+// Свой список установленных: без самого приложения и прочих webtoapk-обёрток.
+function listInstalled() {
   const N = window.Native;
-  if (!N || !N.installedApps) return;
+  if (!N || !N.installedApps) return [];
   try {
     const me = (N.appInfo() || {}).packageName;
-    ST.installed = (N.installedApps() || []).filter(a => a.packageName !== me && !a.packageName.endsWith('.webtoapk'));
-  } catch (e) { ST.installed = []; }
+    return (N.installedApps() || []).filter(a => a.packageName !== me && !a.packageName.endsWith('.webtoapk'));
+  } catch (e) { return []; }
 }
+function refreshInstalled() { ST.installed = listInstalled(); }
 function loadInstalled() { refreshInstalled(); }
 // Заморозить/разморозить через Hail (работает асинхронно — перечитываем список позже).
 function toggleFrozen(a) {
@@ -474,8 +481,7 @@ async function checkUpdates(force) {
   if (force) { for (const k in updCache) delete updCache[k]; } // кнопка «Проверить» — реальный опрос
   ST.updChecking = true; ST.updProgress = 'Читаем установленные…'; ST.updErr = '';
   try {
-    const me = (N.appInfo() || {}).packageName;
-    const apps = (N.installedApps() || []).filter(a => a.packageName !== me && !a.packageName.endsWith('.webtoapk'));
+    const apps = listInstalled();
     ST.installed = apps;
     if (!apps.length) {
       // Список пуст — скорее всего нет доступа к установленным приложениям.
@@ -514,11 +520,8 @@ async function updateOne(it, btn) {
   const label = it.a.label || it.a.packageName;
   try {
     if (wasFrozen) { hail('UNFREEZE', it.a.packageName); await sleep(900); }
-    const d = await downloadLink(it.v.appId, false);
-    const u = (d.downloadUrls || [])[0];
-    if (!u) throw new Error(it.v.aggregatorInfo ? 'внешний источник — нет прямого APK' : 'RuStore не отдал ссылку');
-    await window.Native.installApk({
-      url: safeUrl(u.url), size: u.size, signer: d.signature, name: it.a.packageName + '.apk',
+    const apk = await resolveApk(it.v.appId, false, it.v.aggregatorInfo ? 'внешний источник — нет прямого APK' : 'RuStore не отдал ссылку');
+    await installApk(apk, it.a.packageName + '.apk', {
       onPermission: function () { if (btn) btn.textContent = 'Разрешите…'; },
       onProgress: function (got, total) { if (btn) btn.textContent = total ? Math.round(got / total * 100) + '%' : '…'; },
       onPending: function () { if (btn) btn.textContent = 'Разверните'; toast('Скачано — вернитесь в приложение для установки'); },
@@ -557,7 +560,7 @@ async function installSelf() {
   if (!j || !canNative()) return;
   toast('Устанавливаем обновление приложения…');
   try {
-    await window.Native.installApk({ url: j.url, size: j.size, signer: j.signer, name: 'webtoapk-' + j.versionCode + '.apk' });
+    await installApk({ url: j.url, size: j.size, signer: j.signer }, 'webtoapk-' + j.versionCode + '.apk');
   } catch (e) { toast('Ошибка: ' + e.message); }
 }
 async function checkSelfUpdate() {
