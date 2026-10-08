@@ -9,7 +9,7 @@
 #        <meta name="web-ver" content="ВЕРСИЯ">
 #        src="incr.js?v=ВЕРСИЯ", src="pre.js?v=ВЕРСИЯ", data-src="app.js?v=ВЕРСИЯ"
 #      → при смене контента меняются URL подресурсов, кэш не мешает;
-#   3) обновляет web в client/version.json (поля APK сохраняются).
+#   3) обновляет web в version.json (поля APK сохраняются).
 #
 # Клиент сравнивает свою мету web-ver с version.json.web и делает hardReload при расхождении.
 set -euo pipefail
@@ -19,7 +19,7 @@ DST="${1:-/work/rustore}"
 
 VER="$(cat "$SRC/index.html" "$SRC/app.js" "$SRC/incr.js" "$SRC/pre.js" | sha256sum | cut -c1-12)"
 
-mkdir -p "$DST/client"
+mkdir -p "$DST"
 cp "$SRC/incr.js" "$SRC/pre.js" "$SRC/app.js" "$DST/"
 
 sed -E \
@@ -29,7 +29,7 @@ sed -E \
   -e "s#(data-src=\"app\.js)(\")#\1?v=${VER}\2#" \
   "$SRC/index.html" > "$DST/index.html"
 
-python3 - "$DST/client/version.json" "$VER" <<'PY'
+python3 - "$DST/version.json" "$VER" <<'PY'
 import json, os, sys
 p, ver = sys.argv[1], sys.argv[2]
 j = {}

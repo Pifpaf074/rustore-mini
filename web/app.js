@@ -386,6 +386,15 @@ async function loadComments(pkg, page) {
 }
 // Открытие карточки из UI — через историю (аппаратный back её закроет).
 function openApp(pkg) { navPush({ tab: ST.tab, detail: pkg }); }
+// Что делать с приложением из карточки: установить / обновить / открыть.
+function installState(i) {
+  const N = window.Native;
+  if (!N || !N.installApk) return 'web';
+  if (!N.isInstalled || !N.isInstalled(i.packageName)) return 'install';
+  const cur = N.installedVersion ? Number(N.installedVersion(i.packageName)) : -1;
+  if (cur >= 0 && Number(i.versionCode) > cur) return 'update';
+  return 'open';
+}
 async function doDownload(i) {
   ST.dlBusy = true; ST.dlLabel = 'Получаем ссылку…';
   try {
@@ -448,6 +457,13 @@ async function checkUpdates() {
     const me = (N.appInfo() || {}).packageName;
     const apps = (N.installedApps() || []).filter(a => a.packageName !== me && !a.packageName.endsWith('.webtoapk'));
     ST.installed = apps;
+    if (!apps.length) {
+      // Список пуст — скорее всего нет доступа к установленным приложениям.
+      ST.updates = [];
+      ST.updErr = 'Нет доступа к списку приложений. Разрешите доступ к установленным приложениям.';
+      ST.updChecking = false;
+      return;
+    }
     let done = 0, netFail = 0;
     const found = [];
     await pool(apps, 4, async function (a) {
@@ -489,9 +505,10 @@ async function updateOne(it, btn) {
     });
     await sleep(700);
     const now = window.Native.installedVersion ? Number(window.Native.installedVersion(it.a.packageName)) : -1;
-    if (now >= Number(it.v.versionCode)) {
+    if (now < 0 || now >= Number(it.v.versionCode)) {
+      // now < 0 — версию не прочитать (нет доступа к списку приложений); считаем, что установка прошла.
       ST.updates = (ST.updates || []).filter(x => x.a.packageName !== it.a.packageName);
-      toast(label + ' обновлён');
+      toast(now < 0 ? (label + ' — установлено (проверить не удалось)') : (label + ' обновлён'));
     } else {
       toast('Установка не применилась: ' + label);
       if (btn) { btn.disabled = false; btn.textContent = 'Обновить'; }
@@ -526,7 +543,7 @@ async function checkSelfUpdate() {
   const N = window.Native;
   if (!N || !N.appInfo) return;
   try {
-    const r = await fetchT('client/version.json?ts=' + Date.now(), { cache: 'no-store' });
+    const r = await fetchT('version.json?ts=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) return;
     const j = await r.json();
     const me = N.appInfo() || {};
@@ -539,7 +556,7 @@ async function checkWebUpdate() {
   const cur = webVer();
   if (!cur || cur === 'dev') return;
   try {
-    const r = await fetchT('client/version.json?_=' + Date.now(), { cache: 'no-store' });
+    const r = await fetchT('version.json?_=' + Date.now(), { cache: 'no-store' });
     if (!r.ok) return;
     const j = await r.json();
     if (j && j.web && j.web !== cur) hardReload();
@@ -772,6 +789,7 @@ const UPDROW = memo((it) => {
 const INSTALLEDVIEW = memo(() => {
   DIV({ class: 'sub' }) {
     if (!ST.installed) DIV({ class: 'hint' }, 'Загрузка…');
+    else if (!ST.installed.length) DIV({ class: 'hint' }, 'Нет доступа к списку приложений. Разрешите доступ к установленным приложениям.');
     else {
       const frozen = ST.installed.filter(isFrozen);
       const normal = ST.installed.filter(a => !isFrozen(a));
@@ -862,7 +880,11 @@ const DETAILBODY = memo((i) => {
     COMMENTS(i.packageName);
     DIV({ class: 'dacts' }) {
       BUTTON({ class: 'ghost', onClick: () => openExt('https://www.rustore.ru/catalog/app/' + i.packageName) }, 'На сайте');
-      BUTTON({ class: 'primary', disabled: ST.dlBusy, onClick: () => doDownload(i) }, ST.dlBusy ? (ST.dlLabel || 'Установка…') : (canNative() ? 'Установить' : 'Скачать APK'));
+      const st = installState(i);
+      BUTTON({ class: 'primary', disabled: ST.dlBusy,
+        onClick: () => st === 'open' ? (window.Native.launchApp && window.Native.launchApp(i.packageName)) : doDownload(i) },
+        ST.dlBusy ? (ST.dlLabel || 'Установка…')
+          : (st === 'update' ? 'Обновить' : st === 'open' ? 'Открыть' : st === 'install' ? 'Установить' : 'Скачать APK'));
     }
   }
 });
