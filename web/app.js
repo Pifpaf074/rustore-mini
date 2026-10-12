@@ -228,12 +228,14 @@ const mqDark = window.matchMedia('(prefers-color-scheme: dark)');
 if (mqDark.addEventListener) mqDark.addEventListener('change', syncSystemTheme);
 else if (mqDark.addListener) mqDark.addListener(syncSystemTheme);
 // Стартовую тему уже выставил head-скрипт (из натива/matchMedia); ST.theme читает класс.
-function hardReload() {
-  // Сбросить кэш и перезагрузить ту же (базовую) URL, чтобы она перекэшировалась.
-  const N = window.Native;
-  if (N && N.clearCache) N.clearCache();
-  setTimeout(function () { location.reload(); }, 350);
-}
+// Жест «потянуть вниз» (см. native.js): обновляем то, что сейчас на экране.
+window.__refreshCurrent = function () {
+  syncSystemTheme();
+  if (ST.detail || ST.detailLoading || ST.detailErr) { if (ST.detailPkg) openDetail(ST.detailPkg); return; }
+  if (searchActive()) { if (ST.query) runSearch(ST.query); return; }
+  if (ST.tab === 'upd') { if (ST.updTab === 'installed') refreshInstalled(); else checkUpdates(true); return; }
+  loadHome(kindOf(ST.tab));
+};
 function launch(pkg, frozen) {
   if (frozen && hailOk() && hail('LAUNCH', pkg)) return; // Hail сам разморозит и запустит
   const N = window.Native;
@@ -617,7 +619,6 @@ const TOPBAR = memo(() => {
       }
       DIV({ class: 'grow' })
       BUTTON({ class: 'ibtn', title: themeTitle(), onClick: toggleTheme }, ST.themeMode === 'auto' ? '◐' : (ST.theme === 'dark' ? '☾' : '☀'))
-      BUTTON({ class: 'ibtn', title: 'Сбросить кеш и перезагрузить', onClick: hardReload }, '⟳')
     }
     DIV({ class: 'tabs' }) {
       for (let i = 0; i < TABS.length; i++) {

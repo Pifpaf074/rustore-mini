@@ -26,6 +26,16 @@
     if (phase === 'done' && data.session === false) { pending = null; cb.resolve({ installed: false }); }
   };
 
+  // --- pull-to-refresh ---
+  // Натив (SwipeRefreshLayout) спрашивает страницу через WebToApk.onPullToRefresh.
+  // Вернуть true = страница сама обновляет контент (иначе натив перезагрузит страницу).
+  // Наш обработчик — window.__refreshCurrent (см. app.js).
+  BT.onPullToRefresh = function () {
+    try { if (window.__refreshCurrent) window.__refreshCurrent(); } catch (e) {}
+    setTimeout(function () { try { BT.setPullToRefreshRefreshing(false); } catch (e) {} }, 700);
+    return true;
+  };
+
   window.Native = {
     // --- установка APK ---
     installApk: function (opts) {
