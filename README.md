@@ -132,8 +132,23 @@ Body: {"appId":2688703,"firstInstall":true,"screenDensity":480,
 
 `backapi` отдаёт **`access-control-allow-origin: *`** и для GET, и для POST
 (preflight разрешает `content-type`, `rustorevercode`, `devicetype`). Поэтому
-**веб-страница может ходить в API напрямую из WebView без прокси**. Прокси
-всё равно бывает полезен (см. §4).
+веб-страница может ходить в API напрямую из WebView без прокси.
+
+**Но есть грабли (важно):** `overallInfo` требует заголовок `RuStoreVerCode` (без
+него 400). С кастомным заголовком браузер шлёт **CORS-preflight на каждый уникальный
+URL** (кэш не помогает — URL'ы разные). OPTIONS-ответ RuStore формально разрешает
+заголовок, но при проверке обновлений (55 пакетов) часть preflight'ов отваливается
+с `net::ERR_FAILED` → приложения выпадают из списка («Не удалось проверить (сеть): N»).
+
+**Решение** (в форке): `shouldInterceptRequest` в WebView перехватывает
+`backapi.rustore.ru/applicationData/overallInfo/*`, сам делает запрос с заголовком
+и отдаёт JSON с `Access-Control-Allow-Origin: *`; JS зовёт `overallInfo` **без**
+заголовка → preflight не возникает вообще.
+
+**Ещё грабля:** у 404-ответа RuStore тело —
+`{"code":"ERROR","message":"Couldn't find required data, error: android_app_ver"}` —
+**без цифр**. Если определять 404 через `/404/` по тексту ошибки, такие приложения
+попадут в «сетевые ошибки». Детектить надо по HTTP-статусу.
 
 ### Картинки и TLS — почему «не грузятся»
 
