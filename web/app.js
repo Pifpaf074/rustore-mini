@@ -105,7 +105,7 @@ function installApk(a, name, cbs) {
 // Параллельный обход с ограничением.
 async function pool(items, size, fn) {
   let i = 0;
-  const worker = async () => { while (i < items.length) { const k = i++; await fn(items[k]); } };
+  const worker = async () => { while (i < items.length) { const k = i++; await fn(items[k], k); } };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(size, items.length || 1)) }, worker));
 }
 // overallInfo с ретраями: сервер иногда отдаёт 429/5xx/сетевую ошибку — без ретрая
@@ -502,6 +502,7 @@ async function openInstalled(a) {
 async function checkUpdates(force) {
   const N = window.Native;
   if (!canNative()) return;
+  if (ST.updChecking) return; // уже идёт (кнопка + pull-to-refresh + автостарт) — не плодим параллельные
   if (force) { for (const k in updCache) delete updCache[k]; } // кнопка «Проверить» — реальный опрос
   ST.updChecking = true; ST.updProgress = 'Читаем установленные…'; ST.updErr = '';
   try {
@@ -514,26 +515,55 @@ async function checkUpdates(force) {
       ST.updChecking = false;
       return;
     }
-    let done = 0, netFail = 0;
-    const found = [];
-    await pool(apps, 3, async function (a) {
-      let v = null;
-      try { v = await infoCached(a.packageName); }
-      catch (e) { if (!is404(e)) netFail++; }
-      if (v && Number(v.versionCode) > Number(a.versionCode)) {
-        let compatible = true;
-        if (v.signature && N.installedSigner) {
-          const sigs = String(N.installedSigner(a.packageName) || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-          compatible = sigs.length === 0 || sigs.indexOf(String(v.signature).toLowerCase()) >= 0;
+    // Порядок фиксируем ДО опроса (по названию) и только ДОПИСЫВАЕМ в конец:
+    // найденное видно сразу, но строки не переставляются — юзер не промахнётся кнопкой.
+    const order = apps.slice().sort((x, y) => String(x.label || '').localeCompare(String(y.label || '')));
+    // Строки, уже показанные (повторная проверка), НЕ сносим: обновляем их на месте.
+    // Новые находки дописываются в конец — ничего не переставляется и не мигает.
+    let list = (ST.updates || []).slice();
+    const pos = {};
+    for (let i = 0; i < list.length; i++) pos[list[i].a.packageName] = i;
+    const results = new Array(order.length);
+    let commitAt = 0, done = 0, netFail = 0;
+    const flush = () => { // выдаём строго по порядку (ответы приходят не по порядку)
+      while (commitAt < results.length && results[commitAt] !== undefined) {
+        const r = results[commitAt], a = order[commitAt];
+        commitAt++;
+        const at = pos[a.packageName];
+        if (r) {
+          if (at === undefined) { pos[a.packageName] = list.length; list.push(r); }
+          else list[at] = r;
+        } else if (at !== undefined) { // обновление пропало — убираем строку
+          list.splice(at, 1);
+          for (const k in pos) if (pos[k] > at) pos[k]--;
+          delete pos[a.packageName];
         }
-        found.push({ a: a, v: v, compatible: compatible });
+        ST.updates = list.slice(); // новая ссылка -> реактивность
       }
+    };
+    await pool(order, 3, async function (a, i) {
+      let item = null;
+      try {
+        let v = null;
+        try { v = await infoCached(a.packageName); }
+        catch (e) { if (!is404(e)) netFail++; }
+        if (v && Number(v.versionCode) > Number(a.versionCode)) {
+          let compatible = true;
+          if (v.signature && N.installedSigner) {
+            const sigs = String(N.installedSigner(a.packageName) || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+            compatible = sigs.length === 0 || sigs.indexOf(String(v.signature).toLowerCase()) >= 0;
+          }
+          item = { a: a, v: v, compatible: compatible };
+        }
+      } catch (e) { /* одна битая запись не должна ломать всю проверку */ }
+      results[i] = item;
       done++;
-      ST.updProgress = 'Проверено ' + done + '/' + apps.length;
+      ST.updProgress = 'Проверено ' + done + '/' + order.length + (list.length ? '  ·  найдено: ' + list.length : '');
+      flush();
     });
-    ST.updates = found.sort((x, y) => String(x.a.label || '').localeCompare(String(y.a.label || '')));
-    ST.updErr = netFail === 0 ? '' : (netFail >= apps.length ? 'Нет соединения с RuStore' : ('Не удалось проверить (сеть): ' + netFail));
-  } catch (e) { toast('Ошибка: ' + e.message); ST.updates = []; ST.updErr = 'Ошибка: ' + e.message; }
+    flush();
+    ST.updErr = netFail === 0 ? '' : (netFail >= order.length ? 'Нет соединения с RuStore' : ('Не удалось проверить (сеть): ' + netFail));
+  } catch (e) { toast('Ошибка: ' + e.message); ST.updErr = 'Ошибка: ' + e.message; }
   ST.updChecking = false;
 }
 const updAllReady = () => !!(ST.updates && ST.updates.some(x => x.compatible));
@@ -781,24 +811,30 @@ const UPDATESVIEW = memo(() => {
   DIV({ class: 'sub' }) {
     DIV({ class: 'updbar' }) {
       BUTTON({ class: 'ghost', onClick: () => checkUpdates(true) }, 'Проверить');
-      BUTTON({ class: 'primary', disabled: !updAllReady(), onClick: updateAll }, 'Обновить все');
+      BUTTON({ class: 'primary', disabled: ST.updChecking || !updAllReady(), onClick: updateAll }, 'Обновить все');
     }
-    if (ST.updChecking) DIV({ class: 'hint' }, ST.updProgress || 'Проверяем…');
-    else if (ST.updErr && (!ST.updates || !ST.updates.length)) {
-      DIV({ class: 'hint' }, ST.updErr);
-      DIV({ class: 'mid' }) { BUTTON({ class: 'ghost', onClick: () => checkUpdates(true) }, 'Повторить') }
-    }
-    else if (!ST.updates) DIV({ class: 'hint' }, 'Нажмите «Проверить обновления».');
-    else if (!ST.updates.length) DIV({ class: 'hint' }, 'Обновлений нет 🎉');
-    else {
-      if (ST.updErr) DIV({ class: 'hint' }, ST.updErr);
+    UPDHINT()
+    // Найденное показываем сразу, не дожидаясь конца проверки (только дописываем в конец).
+    if (ST.updates && ST.updates.length) {
       for (let i = 0; i < ST.updates.length; i++) {
         const it = ST.updates[i];
         window.ID = it.a.packageName;
         UPDROW(it);
       }
+    } else if (!ST.updChecking) {
+      if (!ST.updates) DIV({ class: 'hint' }, 'Нажмите «Проверить обновления».');
+      else if (ST.updErr) DIV({ class: 'mid' }) { BUTTON({ class: 'ghost', onClick: () => checkUpdates(true) }, 'Повторить') }
+      else DIV({ class: 'hint' }, 'Обновлений нет 🎉');
     }
   }
+});
+
+// Прогресс/ошибка — отдельным компонентом: иначе UPDATESVIEW перерисовывался бы на
+// каждом тике прогресса (54 раза) и дёргал бы строки списка без надобности.
+// Высоту строки резервируем всегда (.off -> visibility) — иначе список съезжает.
+const UPDHINT = memo(() => {
+  const t = ST.updChecking ? (ST.updProgress || 'Проверяем…') : (ST.updErr || '');
+  DIV({ class: 'hint stat' + (t ? '' : ' off') }, t);
 });
 
 const UPDROW = memo((it) => {
@@ -991,12 +1027,4 @@ applyTheme();
 loadHome('APPS');
 ensureUpdData();
 checkSelfUpdate();
-// Разрешение на уведомления — чтобы видеть прогресс фоновой загрузки (спрашиваем один раз).
-try {
-  const N0 = window.Native;
-  if (N0 && N0.hasNotifications && N0.requestNotifications && !N0.hasNotifications() && !localStorage.getItem('rs_notif_asked')) {
-    localStorage.setItem('rs_notif_asked', '1');
-    N0.requestNotifications();
-  }
-} catch (e) {}
 mount(document.getElementById('root'), APP);
