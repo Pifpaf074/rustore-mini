@@ -11,6 +11,9 @@ const API_NEW = 'https://api.rustore.ru';       // showcase / download-link
 const API_WEB = 'https://web-api.rustore.ru';   // веб-шлюз (подсказки)
 const HDR = { 'RuStoreVerCode': '1000', 'Accept': 'application/json' };
 const THEME_KEY = 'rs_theme_mode'; // 'auto' | 'light' | 'dark'
+// version.json APK лежит на нашем сервере: из bundled-сайта он кросс-доменный,
+// поэтому читаем его нативным httpGet (без CORS).
+const VER_URL = 'https://example.com/rustore/version.json';
 
 const safeUrl = u => u ? String(u).replace('//static-m.rustore.ru/', '//static.rustore.ru/') : '';
 const mb    = n => n ? (n / 1048576).toFixed(1) + ' МБ' : '—';
@@ -27,6 +30,9 @@ async function fetchT(url, opts) {
   try { return await fetch(url, o); } finally { clearTimeout(t); }
 }
 const netError = (e) => /fetch|network|abort|timeout|load failed|failed to load/i.test(String((e && e.message) || e));
+// 404 = «нет в RuStore», а не сетевая ошибка. Тело ошибки RuStore НЕ содержит «404»
+// ("Couldn't find required data..."), поэтому ориентируемся на HTTP-статус.
+const is404 = (e) => !!(e && (e.status === 404 || /404/.test(String(e.message || ''))));
 
 // Простые GET без кастомных заголовков (не требуют CORS-preflight).
 // Один разбор ответа для всех API. strict: у backapi ошибка — любой code кроме 'OK',
@@ -35,7 +41,11 @@ async function jfetch(url, opts, strict) {
   const r = await fetchT(url, opts);
   const j = await r.json().catch(() => ({}));
   const bad = !r.ok || (j && j.code && (strict ? j.code !== 'OK' : j.code === 'ERROR'));
-  if (bad) throw new Error((j && j.message) || ('HTTP ' + r.status));
+  if (bad) {
+    const err = new Error((j && j.message) || ('HTTP ' + r.status));
+    err.status = r.status;
+    throw err;
+  }
   return j;
 }
 async function api(path, opts) {
@@ -53,7 +63,7 @@ async function getNew(path) { return jfetch(API_NEW + path, null, false); }
 const search = (q, page, size) =>
   api('/applicationData/apps?pageNumber=' + (page || 0) + '&pageSize=' + (size || 20) + '&query=' + encodeURIComponent(q));
 // overallInfo требует заголовок RuStoreVerCode, но его добавляет нативный слой
-// (перехват в shouldInterceptRequest) — из JS шлём без заголовка, без preflight.
+// (перехват в shouldInterceptRequest) — из JS шлём БЕЗ заголовка, без preflight.
 const info = pkg => api('/applicationData/overallInfo/' + encodeURIComponent(pkg));
 const comments = (pkg, page, size) =>
   api('/comment/comment?packageName=' + encodeURIComponent(pkg) + '&sortBy=NEW_FIRST&pageNumber=' + (page || 0) + '&pageSize=' + (size || 10));
@@ -107,7 +117,7 @@ async function infoRetry(pkg, times) {
     try { return await info(pkg); }
     catch (e) {
       last = e;
-      if (/404/.test(String((e && e.message) || ''))) throw e; // нет в RuStore — не ретраим
+      if (is404(e)) throw e; // нет в RuStore — не ретраим
       if (i < n - 1) await sleep(300 * (i + 1));
     }
   }
@@ -457,6 +467,16 @@ function listInstalled() {
 }
 function refreshInstalled() { ST.installed = listInstalled(); }
 function loadInstalled() { refreshInstalled(); }
+// Иконки установленных приложений: ленивый кэш (base64 PNG из нативного моста).
+const appIconCache = {};
+function appIcon(pkg) {
+  if (!(pkg in appIconCache)) {
+    let d = '';
+    try { const N = window.Native; if (N && N.appIcon) d = N.appIcon(pkg) || ''; } catch (e) {}
+    appIconCache[pkg] = d;
+  }
+  return appIconCache[pkg];
+}
 // Заморозить/разморозить через Hail (работает асинхронно — перечитываем список позже).
 function toggleFrozen(a) {
   if (!hailOk()) { toast('Hail не установлен'); return; }
@@ -497,7 +517,7 @@ async function checkUpdates(force) {
     await pool(apps, 3, async function (a) {
       let v = null;
       try { v = await infoCached(a.packageName); }
-      catch (e) { if (!/404/.test(String((e && e.message) || ''))) netFail++; }
+      catch (e) { if (!is404(e)) netFail++; }
       if (v && Number(v.versionCode) > Number(a.versionCode)) {
         let compatible = true;
         if (v.signature && N.installedSigner) {
@@ -569,24 +589,12 @@ async function checkSelfUpdate() {
   const N = window.Native;
   if (!N || !N.appInfo) return;
   try {
-    const r = await fetchT('version.json?ts=' + Date.now(), { cache: 'no-store' });
-    if (!r.ok) return;
-    const j = await r.json();
+    const body = N.httpGet ? N.httpGet(VER_URL) : '';
+    if (!body) return;
+    const j = JSON.parse(body);
     const me = N.appInfo() || {};
     if (Number(j.versionCode) > Number(me.versionCode || 0)) ST.selfUpd = j;
   } catch (e) { /* нет version.json — не страшно */ }
-}
-// Веб-часть: метка версии в index.html против version.json.web (авто-версия при деплое).
-function webVer() { const m = document.querySelector('meta[name="web-ver"]'); return m ? (m.getAttribute('content') || '') : ''; }
-async function checkWebUpdate() {
-  const cur = webVer();
-  if (!cur || cur === 'dev') return;
-  try {
-    const r = await fetchT('version.json?_=' + Date.now(), { cache: 'no-store' });
-    if (!r.ok) return;
-    const j = await r.json();
-    if (j && j.web && j.web !== cur) hardReload();
-  } catch (e) { /* нет сети — не страшно */ }
 }
 
 // ================================================================== компоненты
@@ -795,6 +803,8 @@ const UPDATESVIEW = memo(() => {
 const UPDROW = memo((it) => {
   const fr = isFrozen(it.a);
   DIV({ class: 'rcard', onClick: () => openApp(it.a.packageName) }) {
+    if (it.v.iconUrl) IMG({ class: 'ric', src: safeUrl(it.v.iconUrl), loading: 'lazy', referrerpolicy: 'no-referrer', alt: '' });
+    else DIV({ class: 'ric ph' }, (it.a.label || it.a.packageName || '?').trim().charAt(0).toUpperCase());
     DIV({ class: 'rct' }) {
       DIV({ class: 'cname' }) {
         SPAN({ class: 'nm' }, it.a.label || it.a.packageName);
@@ -834,8 +844,10 @@ const INSTALLEDVIEW = memo(() => {
 
 const IROW = memo((a) => {
   const fr = isFrozen(a);
+  const ic = appIcon(a.packageName);
   DIV({ class: 'rcard', onClick: () => openInstalled(a) }) {
-    DIV({ class: 'avt' }, (a.label || a.packageName || '?').trim().charAt(0).toUpperCase());
+    if (ic) IMG({ class: 'ric', src: ic, alt: '' });
+    else DIV({ class: 'ric ph' }, (a.label || a.packageName || '?').trim().charAt(0).toUpperCase());
     DIV({ class: 'rct' }) {
       DIV({ class: 'cname' }) {
         SPAN({ class: 'nm' }, a.label || a.packageName);
@@ -978,7 +990,6 @@ applyTheme();
 loadHome('APPS');
 ensureUpdData();
 checkSelfUpdate();
-checkWebUpdate();
 // Разрешение на уведомления — чтобы видеть прогресс фоновой загрузки (спрашиваем один раз).
 try {
   const N0 = window.Native;

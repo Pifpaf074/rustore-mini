@@ -1,0 +1,233 @@
+diff --git a/default.conf b/default.conf
+index d01c3e2..a6a0674 100644
+--- a/default.conf
++++ b/default.conf
+@@ -41,4 +41,5 @@ DebugWebView = false
+ geolocationEnabled = false
+ cameraEnabled = false
+ microphoneEnabled = false
+-showDetailsOnErrorScreen = false
+\ No newline at end of file
++showDetailsOnErrorScreen = false
++managePackages = false
+\ No newline at end of file
+diff --git a/make.sh b/make.sh
+index fece830..8127268 100755
+--- a/make.sh
++++ b/make.sh
+@@ -277,6 +277,12 @@ apply_config() {
+             "site")
+                 set_site "$value"
+                 ;;
++            "managePackages")
++                # RuStore-расширение: видимость пакетов + установка APK.
++                set_var "managePackages = $value"
++                update_permission "android.permission.QUERY_ALL_PACKAGES" "$value"
++                update_permission "android.permission.REQUEST_INSTALL_PACKAGES" "$value"
++                ;;
+             *)
+                 set_var "$key = $value"
+                 ;;
+diff --git a/src/AndroidManifest.xml b/src/AndroidManifest.xml
+index f0b2495..7a409b5 100644
+--- a/src/AndroidManifest.xml
++++ b/src/AndroidManifest.xml
+@@ -33,5 +33,10 @@
+             android:name=".MediaPlaybackService"
+             android:exported="false"
+             android:foregroundServiceType="mediaPlayback" />
++
++        <!-- RuStore-расширение: статус установки из PackageInstaller-сессии. -->
++        <receiver
++            android:name=".InstallResultReceiver"
++            android:exported="false" />
+     </application>
+ </manifest>
+diff --git a/src/java/MainActivity.java b/src/java/MainActivity.java
+index 4613997..8493b7e 100644
+--- a/src/java/MainActivity.java
++++ b/src/java/MainActivity.java
+@@ -159,6 +159,12 @@ public class MainActivity extends AppCompatActivity {
+     int fadeInDuration = 400;
+     boolean DebugWebView = false;
+ 
++    // RuStore-расширение (наш форк): видимость пакетов + установка APK.
++    boolean managePackages = false;
++
++    // Виден ли активити в foreground — чтобы не коммитить установку из фона (BAL).
++    public static volatile boolean sVisible = false;
++
+     boolean geolocationEnabled = false;
+     boolean cameraEnabled = false;
+     boolean microphoneEnabled = false;
+@@ -547,25 +553,19 @@ public class MainActivity extends AppCompatActivity {
+         if (webview != null) webview.saveState(outState);
+     }
+ 
+-    // TODO idk what do with this. rly need?
+-    // @Override
+-    // protected void onPause() {
+-    //     super.onPause();
+-    //     Log.d("WebToApk", "onPause");
+-    //     if (webview != null) {
+-    //         Log.d("WebToApk", "onPause 2");
+-    //         webview.onPause();
+-    //     }
+-    // }
+-    // @Override
+-    // protected void onResume() {
+-    //     super.onResume();
+-    //     Log.d("WebToApk", "onResume");
+-    //     if (webview != null) {
+-    //         Log.d("WebToApk", "onResume 2");
+-    //         webview.onResume();
+-    //     }
+-    // }
++    // Отслеживаем видимость (для отложенной установки) и докоммитим pending при возврате.
++    @Override
++    protected void onResume() {
++        super.onResume();
++        sVisible = true;
++        if (webview != null) ApkInstaller.retryPending(this, webview);
++    }
++
++    @Override
++    protected void onPause() {
++        super.onPause();
++        sVisible = false;
++    }
+ 
+     /* DownloadManager writes into the public Downloads directory, so before API 29 the enqueue is
+        preceded by a WRITE_EXTERNAL_STORAGE round-trip (see onRequestPermissionsResult) */
+@@ -1122,6 +1122,14 @@ public class MainActivity extends AppCompatActivity {
+                 return assetResponse;
+             }
+ 
++            // RuStore: overallInfo требует заголовок RuStoreVerCode — проксируем сами,
++            // иначе браузер шлёт preflight на каждый уникальный URL и часть отваливается.
++            if ("backapi.rustore.ru".equals(host)
++                    && request.getUrl().getPath().startsWith("/applicationData/overallInfo/")) {
++                WebResourceResponse proxied = ApkInstaller.overallInfoProxy(request.getUrl().toString());
++                if (proxied != null) return proxied;
++            }
++
+             return super.shouldInterceptRequest(view, request);
+         }
+ 
+@@ -1383,6 +1391,116 @@ public class MainActivity extends AppCompatActivity {
+             handOffDownload(id, Intent.ACTION_SEND);
+         }
+ 
++        // ---- RuStore-расширение (наш форк) ------------------------------------
++
++        /** Скачать APK (DownloadManager) и установить.
++         *  opts - JSON: {url, size?, signer?, name?}. Результат — событием 'apk'
++         *  (window.__webtoapkEvent). */
++        @JavascriptInterface
++        public void installApk(String optsJson) {
++            ApkInstaller.install(MainActivity.this, webview, optsJson);
++        }
++
++        /** [{packageName, versionCode, versionName, label, enabled, suspended}]. */
++        @JavascriptInterface
++        public String getInstalledApps() {
++            return ApkInstaller.installedApps(context);
++        }
++
++        @JavascriptInterface
++        public boolean isPackageInstalled(String pkg) {
++            return ApkInstaller.isInstalled(context, pkg);
++        }
++
++        /** versionCode установленного пакета или -1. */
++        @JavascriptInterface
++        public long getInstalledVersion(String pkg) {
++            return ApkInstaller.installedVersion(context, pkg);
++        }
++
++        /** SHA-256 подписи установленного пакета (hex, возможно несколько через запятую). */
++        @JavascriptInterface
++        public String getInstalledSigner(String pkg) {
++            return ApkInstaller.installedSigner(context, pkg);
++        }
++
++        /** Иконка установленного пакета (base64 PNG) или "". */
++        @JavascriptInterface
++        public String getAppIcon(String pkg) {
++            return ApkInstaller.appIcon(context, pkg);
++        }
++
++        /** Установлен ли Hail (freeze-менеджер). */
++        @JavascriptInterface
++        public boolean hailAvailable() {
++            return ApkInstaller.hailAvailable(context);
++        }
++
++        /** Экшен Hail: FREEZE/UNFREEZE/LAUNCH/... (pkg может быть ""). */
++        @JavascriptInterface
++        public boolean hailAction(String action, String pkg) {
++            return ApkInstaller.hail(context, action, pkg);
++        }
++
++        /** Открыть системный экран «Информация о приложении». */
++        @JavascriptInterface
++        public void openAppInfo(String pkg) {
++            ApkInstaller.openAppInfo(context, pkg);
++        }
++
++        /** Запустить установленное приложение по packageName. */
++        @JavascriptInterface
++        public boolean launchApp(String pkg) {
++            Intent i = context.getPackageManager().getLaunchIntentForPackage(pkg);
++            if (i == null) return false;
++            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
++            context.startActivity(i);
++            return true;
++        }
++
++        /** {packageName, versionName, versionCode} обёртки. */
++        @JavascriptInterface
++        public String getAppInfo() {
++            return ApkInstaller.appInfo(context);
++        }
++
++        /** {sdk, model, manufacturer, locale, density, abis[]}. */
++        @JavascriptInterface
++        public String getDeviceInfo() {
++            return ApkInstaller.deviceInfo(context);
++        }
++
++        /** Открыть ссылку во внешнем браузере/приложении. */
++        @JavascriptInterface
++        public void openExternal(String url) {
++            ApkInstaller.openUrl(context, url);
++        }
++
++        /** GET с телом ответа строкой — обход CORS для version.json на своём сервере.
++         *  Вызывается на JavaBridge-потоке, поэтому блокирующий сетевой вызов допустим. */
++        @JavascriptInterface
++        public String httpGet(String url) {
++            try {
++                java.net.HttpURLConnection c =
++                        (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
++                c.setConnectTimeout(10000);
++                c.setReadTimeout(10000);
++                c.setRequestProperty("Accept", "application/json");
++                int code = c.getResponseCode();
++                java.io.InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
++                if (in == null) return "";
++                java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
++                byte[] buf = new byte[8192];
++                int n;
++                while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
++                in.close();
++                return bos.toString("UTF-8");
++            } catch (Exception e) {
++                Log.e("WebToApk", "httpGet failed: " + url, e);
++                return "";
++            }
++        }
++
+         @JavascriptInterface
+         public void showShortToast(String message) {
+             Handler mainHandler = new Handler(Looper.getMainLooper());
