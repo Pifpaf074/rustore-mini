@@ -237,7 +237,7 @@ URL** (кэш не помогает — URL'ы разные). OPTIONS-ответ
 Минус: WebView-приложение, требуется собственный web-хостинг (впрочем, можно
 и `file:///android_asset/…`).
 
-**Готовый гайд с кодом — в `PATCH-website-to-apk.md`.**
+**Готовый гайд с кодом — в `native/README.md`** (и сам патч — `native/upstream-src.patch`).
 
 ### Вариант B. F-Droid репозиторий — **0 строк Android-кода**
 
@@ -291,8 +291,8 @@ Obtainium сам качает APK с сайта и ставит, умеет от
   `download`. Умеет `static-m`→`static`, `withoutSplits`, проверку размера.
 * `web/index.html` — самодостаточный web-UI (поиск, карточка, скриншоты,
   «Скачать APK») для WebView-обёртки. Ходит в `backapi` напрямую (CORS открыт).
-* `PATCH-website-to-apk.md` — что и куда дописать в `website-to-apk`, чтобы
-  скачанный APK сразу ставился.
+* `native/README.md` — что мы дописали в апстрим (`web-to-app`) и зачем;
+  `native/upstream-src.patch` — сам diff по `src/`.
 
 Проверить CLI:
 ```bash
