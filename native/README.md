@@ -18,11 +18,25 @@
 1. Поля: `boolean managePackages = false;` и `public static volatile boolean sVisible = false;`.
 2. `onResume()`/`onPause()` — ведут `sVisible` и вызывают `ApkInstaller.retryPending()`
    (Android блокирует коммит установки из фона — `Background activity launch blocked`).
+   `retryPending()` заодно повторяет запуск диалога подтверждения, если система его
+   потеряла (`sUserAction`, см. ниже).
 3. `shouldInterceptRequest` — проксирует `backapi.rustore.ru/applicationData/overallInfo/*`
    (см. ниже).
-4. `@JavascriptInterface`-методы: `installApk`, `getInstalledApps`, `isPackageInstalled`,
+4. Инжект инсетов: `document.documentElement` может быть ещё `null` (инжект прилетает
+   до парсинга `<html>`) — вызов обёрнут в `(function(){var d=document.documentElement;if(!d)return;…})()`,
+   иначе на каждом холодном старте 3 × `Cannot read properties of null (reading 'style')`.
+5. `@JavascriptInterface`-методы: `installApk`, `getInstalledApps`, `isPackageInstalled`,
    `getInstalledVersion`, `getInstalledSigner`, `getAppIcon`, `hailAvailable`, `hailAction`,
    `openAppInfo`, `launchApp`, `getAppInfo`, `getDeviceInfo`, `openExternal`, `httpGet`.
+
+## Почему повторяется диалог подтверждения установки
+
+`PackageInstaller` отдаёт `STATUS_PENDING_USER_ACTION` и интент диалога, который мы
+запускаем сами. Если запуск заблокирован (приложение в фоне / уже висит другой
+диалог установки), интент теряется — сессия навсегда остаётся «ждёт пользователя»,
+а страница навсегда ждёт `installed`/`error` (кнопка навсегда «…»). Поэтому интент
+запоминается в `sUserAction` и повторно запускается из `onResume` → `retryPending()`;
+сбрасывается на `STATUS_SUCCESS`/любой ошибке.
 
 ## `make.sh` / `default.conf`
 
@@ -75,6 +89,12 @@ rsync -a --delete /work/rustore-mini/web/ /work/2/confs/rustore/site/
 
 ## Пожелания апстриму
 
+- **Баг:** инжект инсетов падает до парсинга `<html>` — 3 × `Cannot read properties of
+  null (reading 'style')` в консоли на каждом холодном старте (лечится guard'ом, см. выше).
+- **Баг:** потерянный интент подтверждения установки (`STATUS_PENDING_USER_ACTION`)
+  навсегда вешает установку — нужен повторный запуск из `onResume`.
 - `deleteDownload(id)` — чтобы подчищать скачанные APK (**обещано**).
 - `httpGet(url)` — обход CORS для `version.json` (у нас уже есть в форке).
+- Документация JS-хуков: страница сама присваивает `WebToApk.onDownloadStarted = fn`;
+  `onPullToRefresh` обязан вернуть `true`, иначе обёртка перезагружает страницу.
 - Опционально: `installDownloaded(id)`, `getInstalledApps()`, `getAppIcon(pkg)`.

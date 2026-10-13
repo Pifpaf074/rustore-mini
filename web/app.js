@@ -158,9 +158,12 @@ const ST = data({
   query: '', suggests: [], results: null, searching: false,
   detail: null, detailPkg: null, detailLoading: false, detailErr: '',
   comments: null, commentsLoading: false, commentsErr: '', commentsPage: 0, commentsTotal: 0,
-  dlBusy: false, dlLabel: '',
+  // Одна установка за раз (нативный мост держит один слот pending).
+  // dlPkg — пакет, который ставится прямо сейчас; '#self' — самообновление приложения.
+  dlPkg: null, dlLabel: '',
   selfUpd: null,
   updTab: 'upd', updates: null, updChecking: false, updProgress: '', updErr: '',
+  updBusy: '', updAllBusy: false,
   installed: null,
   toast: '',
 });
@@ -273,7 +276,7 @@ function ensureUpdData() {
 }
 function closeDetail() {
   if (navStack.length) navBack();
-  else { ST.detail = null; ST.detailErr = ''; }
+  else hideDetail();
 }
 
 // --- история для аппаратной кнопки «Назад» (нативный onBackPressed → goBack) ---
@@ -293,7 +296,7 @@ function applyNav(s) {
   if (tab === 'upd') ensureUpdData();
   else ensureHome(kindOf(tab));
   if (s && s.detail) openDetail(s.detail);
-  else { ST.detail = null; ST.detailErr = ''; }
+  else hideDetail();
 }
 function navPush(s) { navStack.push(s); armSentinel(); applyNav(s); }
 function navBack() { if (hasBackTarget()) history.back(); }
@@ -404,12 +407,25 @@ function pickSuggest(s) {
 }
 
 // ------------------------------------------------------------------ карточка приложения
+// Номер текущего запроса карточки: ответы устаревших запросов игнорируются.
+let detailSeq = 0;
 async function openDetail(pkg) {
-  ST.detail = null; ST.detailPkg = pkg; ST.detailErr = ''; ST.detailLoading = true; ST.dlBusy = false; ST.dlLabel = '';
+  const my = ++detailSeq;
+  ST.detail = null; ST.detailPkg = pkg; ST.detailErr = ''; ST.detailLoading = true;
   ST.comments = null; ST.commentsLoading = false; ST.commentsErr = ''; ST.commentsPage = 0; ST.commentsTotal = 0;
-  try { ST.detail = await info(pkg); }
-  catch (e) { ST.detailErr = 'Ошибка: ' + e.message; }
-  ST.detailLoading = false;
+  let d = null, err = '';
+  try { d = await info(pkg); }
+  catch (e) { err = 'Ошибка: ' + e.message; }
+  if (my !== detailSeq) return;   // карточку закрыли/переключили — ответ уже не наш
+  ST.detail = d; ST.detailErr = err; ST.detailLoading = false;
+}
+// Закрытие карточки. detailLoading обязателен к сбросу: иначе оверлей
+// остаётся открытым ('open' при detailLoading), и пришедший ответ показывает
+// карточку заново — «закрыл, а она открылась». Счётчик гасит ответы в полёте.
+function hideDetail() {
+  detailSeq++;
+  ST.detail = null; ST.detailErr = ''; ST.detailLoading = false;
+  ST.comments = null; ST.commentsLoading = false; ST.commentsErr = '';
 }
 // Отзывы грузятся лениво — по кнопке (только просмотр).
 const CMT_PAGE = 10;
@@ -419,11 +435,15 @@ async function loadComments(pkg, page) {
   if (page === 0) { ST.comments = []; ST.commentsErr = ''; }
   try {
     const b = await comments(pkg, page, CMT_PAGE);
+    if (ST.detailPkg !== pkg) return;   // карточку успели сменить/закрыть — не пишем в чужую
     const list = (b && b.content) || [];
     ST.comments = (page === 0 ? [] : (ST.comments || [])).concat(list);
     ST.commentsPage = page;
     ST.commentsTotal = (b && b.totalElements) || 0;
-  } catch (e) { ST.commentsErr = 'Ошибка: ' + e.message; toast('Отзывы: ' + e.message); }
+  } catch (e) {
+    if (ST.detailPkg !== pkg) return;
+    ST.commentsErr = 'Ошибка: ' + e.message; toast('Отзывы: ' + e.message);
+  }
   ST.commentsLoading = false;
 }
 // Открытие карточки из UI — через историю (аппаратный back её закроет).
@@ -438,13 +458,19 @@ function installState(i) {
   return 'open';
 }
 async function doDownload(i) {
-  ST.dlBusy = true; ST.dlLabel = 'Получаем ссылку…';
+  const pkg = i.packageName;
+  if (ST.dlPkg) { toast('Другая установка ещё идёт'); return; }
+  ST.dlPkg = pkg; ST.dlLabel = 'Получаем ссылку…';
   try {
     const apk = await resolveApk(i.appId, true, 'RuStore не отдал ссылку (внешний источник?)', i.signature);
     if (canNative()) {
-      await installApk(apk, i.packageName + '-' + i.versionCode + '.apk', {
-        onProgress: function (got, total) { ST.dlLabel = total ? Math.round(got / total * 100) + '%' : mb(got); },
-        onPending: function () { ST.dlLabel = 'Разверните приложение'; toast('Скачано — вернитесь в приложение для установки'); },
+      await installApk(apk, pkg + '-' + i.versionCode + '.apk', {
+        onProgress: function (got, total) { if (ST.dlPkg === pkg) ST.dlLabel = total ? Math.round(got / total * 100) + '%' : mb(got); },
+        onPending: function (phase) {
+          if (ST.dlPkg !== pkg) return;
+          if (phase === 'permission') { ST.dlLabel = 'Разрешите установку'; toast('Разрешите установку из этого источника'); }
+          else { ST.dlLabel = 'Разверните приложение'; toast('Скачано — вернитесь в приложение для установки'); }
+        },
       });
       toast('Установщик открыт');
     } else {
@@ -454,7 +480,7 @@ async function doDownload(i) {
       toast('Загрузка началась');
     }
   } catch (e) { toast('Ошибка: ' + e.message); }
-  ST.dlBusy = false; ST.dlLabel = '';
+  if (ST.dlPkg === pkg) { ST.dlPkg = null; ST.dlLabel = ''; }
 }
 
 // ------------------------------------------------------------------ обновления
@@ -567,18 +593,26 @@ async function checkUpdates(force) {
   ST.updChecking = false;
 }
 const updAllReady = () => !!(ST.updates && ST.updates.some(x => x.compatible));
-async function updateOne(it, btn) {
+async function updateOne(it, btn, prog) {
   if (!it || !it.compatible) return;
+  const pkg = it.a.packageName;
+  if (ST.dlPkg && ST.dlPkg !== pkg) { toast('Другая установка ещё идёт'); return; }
+  ST.dlPkg = pkg;
+  // say() пишет в текст кнопки (одиночное обновление), в строку прогресса (массовое)
+  // и в состояние активной установки (чтобы карточка того же пакета показывала прогресс).
+  const say = function (s) { if (btn) btn.textContent = s; if (prog) prog(s); if (ST.dlPkg === pkg) ST.dlLabel = s; };
   if (btn) { btn.disabled = true; btn.textContent = '…'; }
   const wasFrozen = isFrozen(it.a) && hailOk();
-  const label = it.a.label || it.a.packageName;
+  const label = it.a.label || pkg;
   try {
-    if (wasFrozen) { hail('UNFREEZE', it.a.packageName); await sleep(900); }
+    if (wasFrozen) { hail('UNFREEZE', pkg); await sleep(900); }
     const apk = await resolveApk(it.v.appId, false, it.v.aggregatorInfo ? 'внешний источник — нет прямого APK' : 'RuStore не отдал ссылку', it.v.signature);
-    await installApk(apk, it.a.packageName + '.apk', {
-      onPermission: function () { if (btn) btn.textContent = 'Разрешите…'; },
-      onProgress: function (got, total) { if (btn) btn.textContent = total ? Math.round(got / total * 100) + '%' : '…'; },
-      onPending: function () { if (btn) btn.textContent = 'Разверните'; toast('Скачано — вернитесь в приложение для установки'); },
+    await installApk(apk, pkg + '.apk', {
+      onProgress: function (got, total) { say(total ? Math.round(got / total * 100) + '%' : '…'); },
+      onPending: function (phase) {
+        if (phase === 'permission') { say('Разрешите установку'); toast('Разрешите установку из этого источника'); }
+        else { say('Разверните'); toast('Скачано — вернитесь в приложение для установки'); }
+      },
     });
     await sleep(700);
     const now = window.Native.installedVersion ? Number(window.Native.installedVersion(it.a.packageName)) : -1;
@@ -595,27 +629,42 @@ async function updateOne(it, btn) {
     toast('Ошибка: ' + e.message);
     if (btn) { btn.disabled = false; btn.textContent = 'Обновить'; }
   } finally {
+    if (ST.dlPkg === pkg) { ST.dlPkg = null; ST.dlLabel = ''; }
     // Вернуть заморозку (даже при ошибке) — если она была.
-    if (wasFrozen) { await sleep(1200); hail('FREEZE', it.a.packageName); }
+    if (wasFrozen) { await sleep(1200); hail('FREEZE', pkg); }
   }
 }
 async function updateAll() {
+  if (ST.updAllBusy) return;
   const list = (ST.updates || []).filter(x => x.compatible);
+  if (!list.length) return;
+  ST.updAllBusy = true;
   for (let i = 0; i < list.length; i++) {
-    toast('Обновляем ' + (list[i].a.label || list[i].a.packageName) + '…');
-    try { await updateOne(list[i], null); } catch (e) {}
+    const label = list[i].a.label || list[i].a.packageName;
+    const head = 'Обновляем ' + label + '  ·  ' + (i + 1) + '/' + list.length;
+    ST.updBusy = head;
+    try { await updateOne(list[i], null, function (s) { ST.updBusy = head + '  ·  ' + s; }); } catch (e) {}
   }
+  ST.updBusy = ''; ST.updAllBusy = false;
   toast('Готово');
 }
 
 // ------------------------------------------------------------------ самообновление
 async function installSelf() {
   const j = ST.selfUpd;
-  if (!j || !canNative()) return;
-  toast('Устанавливаем обновление приложения…');
+  if (!j || !canNative() || ST.dlPkg) return;
+  ST.dlPkg = '#self'; ST.dlLabel = 'получаем ссылку…';
   try {
-    await installApk({ url: j.url, size: j.size, signer: j.signer }, 'webtoapk-' + j.versionCode + '.apk');
+    await installApk({ url: j.url, size: j.size, signer: j.signer }, 'webtoapk-' + j.versionCode + '.apk', {
+      onProgress: function (got, total) { if (ST.dlPkg === '#self') ST.dlLabel = total ? Math.round(got / total * 100) + '%' : mb(got); },
+      onPending: function (phase) {
+        if (ST.dlPkg !== '#self') return;
+        if (phase === 'permission') { ST.dlLabel = 'разрешите установку'; toast('Разрешите установку из этого источника'); }
+        else { ST.dlLabel = 'разверните приложение'; toast('Скачано — вернитесь в приложение для установки'); }
+      },
+    });
   } catch (e) { toast('Ошибка: ' + e.message); }
+  if (ST.dlPkg === '#self') { ST.dlPkg = null; ST.dlLabel = ''; }
 }
 async function checkSelfUpdate() {
   const N = window.Native;
@@ -674,9 +723,10 @@ const VIEW = memo(() => {
 });
 
 const SELFBANNER = memo(() => {
+  const busy = ST.dlPkg === '#self';
   DIV({ class: 'banner', hidden: !ST.selfUpd }) {
-    EMIT('Доступно обновление приложения')
-    BUTTON({ class: 'primary small', onClick: installSelf }, 'Обновить');
+    EMIT(busy ? ('Обновляем приложение · ' + (ST.dlLabel || '…')) : 'Доступно обновление приложения')
+    BUTTON({ class: 'primary small', disabled: !!ST.dlPkg, onClick: installSelf }, busy ? '…' : 'Обновить');
   }
 });
 
@@ -811,7 +861,7 @@ const UPDATESVIEW = memo(() => {
   DIV({ class: 'sub' }) {
     DIV({ class: 'updbar' }) {
       BUTTON({ class: 'ghost', onClick: () => checkUpdates(true) }, 'Проверить');
-      BUTTON({ class: 'primary', disabled: ST.updChecking || !updAllReady(), onClick: updateAll }, 'Обновить все');
+      BUTTON({ class: 'primary', disabled: ST.updChecking || ST.updAllBusy || !updAllReady(), onClick: updateAll }, 'Обновить все');
     }
     UPDHINT()
     // Найденное показываем сразу, не дожидаясь конца проверки (только дописываем в конец).
@@ -832,9 +882,10 @@ const UPDATESVIEW = memo(() => {
 // Прогресс/ошибка — отдельным компонентом: иначе UPDATESVIEW перерисовывался бы на
 // каждом тике прогресса (54 раза) и дёргал бы строки списка без надобности.
 // Высоту строки резервируем всегда (.off -> visibility) — иначе список съезжает.
+// Приоритет: прогресс массового обновления -> прогресс проверки -> ошибка.
 const UPDHINT = memo(() => {
-  const t = ST.updChecking ? (ST.updProgress || 'Проверяем…') : (ST.updErr || '');
-  DIV({ class: 'hint stat' + (t ? '' : ' off') }, t);
+  const t = ST.updBusy || (ST.updChecking ? (ST.updProgress || 'Проверяем…') : (ST.updErr || ''));
+  DIV({ class: 'hint stat' + (t ? '' : ' off') + (ST.updBusy ? ' busy' : '') }, t);
 });
 
 const UPDROW = memo((it) => {
@@ -854,7 +905,7 @@ const UPDROW = memo((it) => {
       }
       if (!it.compatible) DIV({ class: 'bad' }, 'другая подпись — обновление недоступно');
     }
-    if (it.compatible) BUTTON({ class: 'primary small', onClick: (e) => { e.stopPropagation(); updateOne(it, e.currentTarget); } }, 'Обновить');
+    if (it.compatible) BUTTON({ class: 'primary small', disabled: ST.updAllBusy, onClick: (e) => { e.stopPropagation(); updateOne(it, e.currentTarget); } }, 'Обновить');
     else BUTTON({ class: 'ghost small', disabled: true }, 'Недоступно');
   }
 });
@@ -960,9 +1011,10 @@ const DETAILBODY = memo((i) => {
     DIV({ class: 'dacts' }) {
       BUTTON({ class: 'ghost', onClick: () => openExt('https://www.rustore.ru/catalog/app/' + i.packageName) }, 'На сайте');
       const st = installState(i);
-      BUTTON({ class: 'primary', disabled: ST.dlBusy,
+      BUTTON({ class: 'primary', disabled: !!ST.dlPkg,
         onClick: () => st === 'open' ? (window.Native.launchApp && window.Native.launchApp(i.packageName)) : doDownload(i) },
-        ST.dlBusy ? (ST.dlLabel || 'Установка…')
+        ST.dlPkg === i.packageName ? (ST.dlLabel || 'Установка…')
+          : ST.dlPkg ? 'Занято…'
           : (st === 'update' ? 'Обновить' : st === 'open' ? 'Открыть' : st === 'install' ? 'Установить' : 'Скачать APK'));
     }
   }

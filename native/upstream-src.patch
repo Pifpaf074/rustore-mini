@@ -44,7 +44,7 @@ index f0b2495..7a409b5 100644
      </application>
  </manifest>
 diff --git a/src/java/MainActivity.java b/src/java/MainActivity.java
-index 4613997..8493b7e 100644
+index 4613997..9763bee 100644
 --- a/src/java/MainActivity.java
 +++ b/src/java/MainActivity.java
 @@ -159,6 +159,12 @@ public class MainActivity extends AppCompatActivity {
@@ -60,7 +60,28 @@ index 4613997..8493b7e 100644
      boolean geolocationEnabled = false;
      boolean cameraEnabled = false;
      boolean microphoneEnabled = false;
-@@ -547,25 +553,19 @@ public class MainActivity extends AppCompatActivity {
+@@ -390,12 +396,15 @@ public class MainActivity extends AppCompatActivity {
+             // Pass insets to WebView via CSS custom properties.
+             // These names are chosen to be close to the standard CSS env() variables.
+             // The web content can then use var(--safe-area-inset-top).
++            // document.documentElement может быть ещё null (инжект прилетает до парсинга
++            // <html>) — иначе 3 x "Cannot read properties of null (reading 'style')" в консоли.
+             String js = String.format(java.util.Locale.US,
+-                "document.documentElement.style.setProperty('--safe-area-inset-top', '%.2fpx');" +
+-                "document.documentElement.style.setProperty('--safe-area-inset-bottom', '%.2fpx');" +
+-                "document.documentElement.style.setProperty('--safe-area-inset-left', '%.2fpx');" +
+-                "document.documentElement.style.setProperty('--safe-area-inset-right', '%.2fpx');" +
+-                "document.dispatchEvent(new CustomEvent('WebToApkInsetsApplied'));",
++                "(function(){var d=document.documentElement;if(!d)return;" +
++                "d.style.setProperty('--safe-area-inset-top', '%.2fpx');" +
++                "d.style.setProperty('--safe-area-inset-bottom', '%.2fpx');" +
++                "d.style.setProperty('--safe-area-inset-left', '%.2fpx');" +
++                "d.style.setProperty('--safe-area-inset-right', '%.2fpx');" +
++                "document.dispatchEvent(new CustomEvent('WebToApkInsetsApplied'));})()",
+                 top, bottom, left, right
+             );
+             webview.evaluateJavascript(js, null);
+@@ -547,25 +556,19 @@ public class MainActivity extends AppCompatActivity {
          if (webview != null) webview.saveState(outState);
      }
  
@@ -99,7 +120,7 @@ index 4613997..8493b7e 100644
  
      /* DownloadManager writes into the public Downloads directory, so before API 29 the enqueue is
         preceded by a WRITE_EXTERNAL_STORAGE round-trip (see onRequestPermissionsResult) */
-@@ -1122,6 +1122,14 @@ public class MainActivity extends AppCompatActivity {
+@@ -1122,6 +1125,14 @@ public class MainActivity extends AppCompatActivity {
                  return assetResponse;
              }
  
@@ -114,7 +135,7 @@ index 4613997..8493b7e 100644
              return super.shouldInterceptRequest(view, request);
          }
  
-@@ -1383,6 +1391,116 @@ public class MainActivity extends AppCompatActivity {
+@@ -1383,6 +1394,116 @@ public class MainActivity extends AppCompatActivity {
              handOffDownload(id, Intent.ACTION_SEND);
          }
  

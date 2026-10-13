@@ -59,6 +59,10 @@ public final class ApkInstaller {
     private static File sPendingApk;
     private static WeakReference<Activity> sPendingActivity;
     private static WeakReference<WebView> sPendingWebview;
+    // Интент подтверждения установки (STATUS_PENDING_USER_ACTION). Если запуск был
+    // заблокирован (фон / другой диалог), система его теряет — сессия висит вечно,
+    // а страница ждёт installed/error. Поэтому повторяем запуск при возврате в foreground.
+    private static Intent sUserAction;
 
     private ApkInstaller() {}
 
@@ -230,6 +234,11 @@ public final class ApkInstaller {
 
     /** Продолжить отложенную установку после выдачи разрешения / возврата в foreground. */
     public static void retryPending(Activity a, WebView webview) {
+        // Сессия уже ждёт подтверждения пользователя, а диалог мог не показаться
+        // (запуск из фона заблокирован / перебит другим диалогом) — показываем снова.
+        if (sUserAction != null) {
+            try { a.startActivity(sUserAction); } catch (Exception e) { Log.e(TAG, "retry user action failed", e); }
+        }
         final File apk = sPendingApk;
         if (apk == null || !apk.exists()) return;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
@@ -260,12 +269,15 @@ public final class ApkInstaller {
                 Intent ua = intent.getParcelableExtra(Intent.EXTRA_INTENT);
                 if (ua != null) {
                     ua.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    sUserAction = ua;
                     ctx.startActivity(ua);
                 }
                 o.put("phase", "confirm");
             } else if (status == PackageInstaller.STATUS_SUCCESS) {
+                sUserAction = null;
                 o.put("phase", "installed");
             } else {
+                sUserAction = null;
                 o.put("phase", "error");
                 o.put("message", msg != null ? msg : ("install status " + status));
             }

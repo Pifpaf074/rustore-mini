@@ -40,6 +40,9 @@
     // --- установка APK ---
     installApk: function (opts) {
       return new Promise(function (resolve, reject) {
+        // Натив держит один слот ожидания: вторая установка перебила бы первую
+        // и её промис завис бы навсегда.
+        if (pending) { reject(new Error('другая установка ещё идёт')); return; }
         pending = { resolve: resolve, reject: reject, onProgress: opts.onProgress, onPending: opts.onPending };
         try {
           BT.installApk(JSON.stringify({ url: opts.url, size: opts.size, signer: opts.signer, name: opts.name }));

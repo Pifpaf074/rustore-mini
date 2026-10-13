@@ -79,6 +79,8 @@
   /* Строка состояния проверки: высота зарезервирована всегда, чтобы список не съезжал. */
   .hint.stat { padding: 10px 18px; min-height: 16px; }
   .hint.stat.off { visibility: hidden; }
+  /* Прогресс массового обновления — в одну строку, чтобы список не съезжал. */
+  .hint.stat.busy { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
   .mid { display: flex; justify-content: center; padding-bottom: 20px; }
 
   .seg {
