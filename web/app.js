@@ -164,8 +164,9 @@ const ST = data({
   detail: null, detailPkg: null, detailLoading: false, detailErr: '',
   comments: null, commentsLoading: false, commentsErr: '', commentsPage: 0, commentsTotal: 0,
   // Одна установка за раз (нативный мост держит один слот pending).
-  // dlPkg — пакет, который ставится прямо сейчас; '#self' — самообновление приложения.
-  dlPkg: null, dlLabel: '',
+  // rowBusy: пакет -> текст прогресса; '#self' — самообновление приложения.
+  // Кнопки рендерятся ИЗ ЭТОГО состояния, а не пишутся в DOM руками.
+  rowBusy: {},
   selfUpd: null,
   updTab: 'upd', updates: null, updChecking: false, updProgress: '', updErr: '',
   updBusy: '', updAllBusy: false,
@@ -480,17 +481,16 @@ function installState(i) {
 }
 async function doDownload(i) {
   const pkg = i.packageName;
-  if (ST.dlPkg) { toast('Другая установка ещё идёт'); return; }
-  ST.dlPkg = pkg; ST.dlLabel = 'Получаем ссылку…';
+  if (installBusy()) { toast('Другая установка ещё идёт'); return; }
+  setBusy(pkg, 'Получаем ссылку…');
   try {
     const apk = await resolveApk(i.appId, true, 'RuStore не отдал ссылку (внешний источник?)', i.signature);
     if (canNative()) {
       const res = await installApk(apk, pkg + '-' + i.versionCode + '.apk', {
-        onProgress: function (got, total) { if (ST.dlPkg === pkg) ST.dlLabel = total ? Math.round(got / total * 100) + '%' : mb(got); },
+        onProgress: function (got, total) { setBusy(pkg, total ? Math.round(got / total * 100) + '%' : mb(got)); },
         onPending: function (phase) {
-          if (ST.dlPkg !== pkg) return;
-          if (phase === 'permission') { ST.dlLabel = 'Разрешите установку'; toast('Разрешите установку из этого источника'); }
-          else { ST.dlLabel = 'Разверните приложение'; toast('Скачано — вернитесь в приложение для установки'); }
+          if (phase === 'permission') { setBusy(pkg, 'Разрешите установку'); toast('Разрешите установку из этого источника'); }
+          else { setBusy(pkg, 'Разверните приложение'); toast('Скачано — вернитесь в приложение для установки'); }
         },
       });
       // installed:true — PackageInstaller-сессия вернула SUCCESS (промис ждёт реального конца
@@ -504,7 +504,7 @@ async function doDownload(i) {
       toast('Загрузка началась');
     }
   } catch (e) { toast('Ошибка: ' + e.message); }
-  if (ST.dlPkg === pkg) { ST.dlPkg = null; ST.dlLabel = ''; }
+  setBusy(pkg, null);
 }
 
 // ------------------------------------------------------------------ обновления
@@ -619,15 +619,17 @@ async function checkUpdates(force) {
   ST.updChecking = false;
 }
 const updAllReady = () => !!(ST.updates && ST.updates.some(x => x.compatible));
-async function updateOne(it, btn, prog) {
+// Занятость установок — в состоянии (движок проксирует вложенные объекты,
+// так что ST.rowBusy[pkg] = '42%' перерисовывает только нужные места).
+function installBusy() { return Object.keys(ST.rowBusy).length > 0; }
+function setBusy(pkg, text) { if (text == null) delete ST.rowBusy[pkg]; else ST.rowBusy[pkg] = text; }
+// prog — необязательный приёмник текста прогресса (строка массового обновления).
+async function updateOne(it, prog) {
   if (!it || !it.compatible) return;
   const pkg = it.a.packageName;
-  if (ST.dlPkg && ST.dlPkg !== pkg) { toast('Другая установка ещё идёт'); return; }
-  ST.dlPkg = pkg;
-  // say() пишет в текст кнопки (одиночное обновление), в строку прогресса (массовое)
-  // и в состояние активной установки (чтобы карточка того же пакета показывала прогресс).
-  const say = function (s) { if (btn) btn.textContent = s; if (prog) prog(s); if (ST.dlPkg === pkg) ST.dlLabel = s; };
-  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  if (installBusy()) return;   // уже что-то ставится — вторую установку не начинаем
+  setBusy(pkg, '…');            // сразу занимаем: до первого тика прогресса кнопка не должна быть активной
+  const say = function (s) { setBusy(pkg, s); if (prog) prog(s); };
   const wasFrozen = isFrozen(it.a) && hailOk();
   const label = it.a.label || pkg;
   let manual = false;   // откат на системный установщик — статус установки нам неизвестен
@@ -646,7 +648,6 @@ async function updateOne(it, btn, prog) {
       // а нам статус не придёт. Поэтому версию не проверяем, строку не убираем и НЕ морозим
       // обратно — иначе заморозим приложение, пока его ещё ставят.
       manual = true;
-      if (btn) { btn.disabled = false; btn.textContent = 'Обновить'; }
       toast(label + ': подтвердите установку в системном установщике');
       return 'manual';
     }
@@ -660,21 +661,19 @@ async function updateOne(it, btn, prog) {
       toast(now < 0 ? (label + ' — установлено (проверить не удалось)') : (label + ' обновлён'));
     } else {
       toast('Установка не применилась: ' + label);
-      if (btn) { btn.disabled = false; btn.textContent = 'Обновить'; }
     }
   } catch (e) {
     toast('Ошибка: ' + e.message);
-    if (btn) { btn.disabled = false; btn.textContent = 'Обновить'; }
   } finally {
-    if (ST.dlPkg === pkg) { ST.dlPkg = null; ST.dlLabel = ''; }
+    setBusy(pkg, null);
     // Вернуть заморозку (даже при ошибке) — если она была и если мы реально дождались
     // конца установки (иначе заморозим приложение прямо во время установки).
     if (wasFrozen && !manual) { await sleep(1200); hail('FREEZE', pkg); }
   }
 }
 async function updateAll() {
-  if (ST.updAllBusy) return;
-  const list = (ST.updates || []).filter(x => x.compatible);
+  if (ST.updAllBusy || installBusy()) return;
+  const list = (ST.updates || []).filter(x => x.compatible && !ST.rowBusy[x.a.packageName]);
   if (!list.length) return;
   ST.updAllBusy = true;
   for (let i = 0; i < list.length; i++) {
@@ -682,7 +681,7 @@ async function updateAll() {
     const head = 'Обновляем ' + label + '  ·  ' + (i + 1) + '/' + list.length;
     ST.updBusy = head;
     let st;
-    try { st = await updateOne(list[i], null, function (s) { ST.updBusy = head + '  ·  ' + s; }); } catch (e) {}
+    try { st = await updateOne(list[i], function (s) { ST.updBusy = head + '  ·  ' + s; }); } catch (e) {}
     // Откат на системный установщик: подтверждение ждёт пользователь — не открываем
     // следующий установщик поверх и не считаем это успехом.
     if (st === 'manual') { ST.updBusy = ''; ST.updAllBusy = false; toast('Дальше — вручную: подтвердите установку'); return; }
@@ -694,19 +693,18 @@ async function updateAll() {
 // ------------------------------------------------------------------ самообновление
 async function installSelf() {
   const j = ST.selfUpd;
-  if (!j || !canNative() || ST.dlPkg) return;
-  ST.dlPkg = '#self'; ST.dlLabel = 'получаем ссылку…';
+  if (!j || !canNative() || installBusy()) return;
+  setBusy('#self', 'получаем ссылку…');
   try {
     await installApk({ url: j.url, size: j.size, signer: j.signer }, 'webtoapk-' + j.versionCode + '.apk', {
-      onProgress: function (got, total) { if (ST.dlPkg === '#self') ST.dlLabel = total ? Math.round(got / total * 100) + '%' : mb(got); },
+      onProgress: function (got, total) { setBusy('#self', total ? Math.round(got / total * 100) + '%' : mb(got)); },
       onPending: function (phase) {
-        if (ST.dlPkg !== '#self') return;
-        if (phase === 'permission') { ST.dlLabel = 'разрешите установку'; toast('Разрешите установку из этого источника'); }
-        else { ST.dlLabel = 'разверните приложение'; toast('Скачано — вернитесь в приложение для установки'); }
+        if (phase === 'permission') { setBusy('#self', 'разрешите установку'); toast('Разрешите установку из этого источника'); }
+        else { setBusy('#self', 'разверните приложение'); toast('Скачано — вернитесь в приложение для установки'); }
       },
     });
   } catch (e) { toast('Ошибка: ' + e.message); }
-  if (ST.dlPkg === '#self') { ST.dlPkg = null; ST.dlLabel = ''; }
+  setBusy('#self', null);
 }
 async function checkSelfUpdate() {
   const N = window.Native;
@@ -765,10 +763,10 @@ const VIEW = memo(() => {
 });
 
 const SELFBANNER = memo(() => {
-  const busy = ST.dlPkg === '#self';
+  const busy = !!ST.rowBusy['#self'];
   DIV({ class: 'banner', hidden: !ST.selfUpd }) {
-    EMIT(busy ? ('Обновляем приложение · ' + (ST.dlLabel || '…')) : 'Доступно обновление приложения')
-    BUTTON({ class: 'primary small', disabled: !!ST.dlPkg, onClick: installSelf }, busy ? '…' : 'Обновить');
+    EMIT(busy ? ('Обновляем приложение · ' + (ST.rowBusy['#self'] || '…')) : 'Доступно обновление приложения')
+    BUTTON({ class: 'primary small', disabled: installBusy(), onClick: installSelf }, busy ? '…' : 'Обновить');
   }
 });
 
@@ -947,7 +945,11 @@ const UPDROW = memo((it) => {
       }
       if (!it.compatible) DIV({ class: 'bad' }, 'другая подпись — обновление недоступно');
     }
-    if (it.compatible) BUTTON({ class: 'primary small', disabled: ST.updAllBusy, onClick: (e) => { e.stopPropagation(); updateOne(it, e.currentTarget); } }, 'Обновить');
+    if (it.compatible) BUTTON({
+      class: 'primary small',
+      disabled: ST.updAllBusy || installBusy(),
+      onClick: (e) => { e.stopPropagation(); updateOne(it); },
+    }, ST.rowBusy[it.a.packageName] || 'Обновить');
     else BUTTON({ class: 'ghost small', disabled: true }, 'Недоступно');
   }
 });
@@ -1053,11 +1055,10 @@ const DETAILBODY = memo((i) => {
     DIV({ class: 'dacts' }) {
       BUTTON({ class: 'ghost', onClick: () => openExt('https://www.rustore.ru/catalog/app/' + i.packageName) }, 'На сайте');
       const st = installState(i);
-      BUTTON({ class: 'primary', disabled: !!ST.dlPkg,
+      BUTTON({ class: 'primary', disabled: installBusy(),
         onClick: () => st === 'open' ? (window.Native.launchApp && window.Native.launchApp(i.packageName)) : doDownload(i) },
-        ST.dlPkg === i.packageName ? (ST.dlLabel || 'Установка…')
-          : ST.dlPkg ? 'Занято…'
-          : (st === 'update' ? 'Обновить' : st === 'open' ? 'Открыть' : st === 'install' ? 'Установить' : 'Скачать APK'));
+        ST.rowBusy[i.packageName] || (installBusy() ? 'Занято…'
+          : (st === 'update' ? 'Обновить' : st === 'open' ? 'Открыть' : st === 'install' ? 'Установить' : 'Скачать APK')));
     }
   }
 });
