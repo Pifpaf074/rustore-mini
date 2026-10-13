@@ -365,6 +365,13 @@ function loadHome(kind) {
 
 // ------------------------------------------------------------------ поиск
 let qT = null;
+// Номера запросов: ответы устаревших (поздних) запросов игнорируются.
+let sugSeq = 0;
+let searchSeq = 0;
+// Снять отложенный/летящий запрос подсказок (Enter, выбор подсказки):
+// без этого таймер qT через 300 мс снова наполнял ST.suggests — и подсказки
+// всплывали поверх уже показанных результатов поиска.
+function clearSuggests() { sugSeq++; clearTimeout(qT); ST.suggests = []; }
 function onQuery(e) {
   const v = e.target.value;
   const had = searchActive();
@@ -377,31 +384,37 @@ function onQuery(e) {
   qT = setTimeout(function () { loadSuggests(v); }, 300);
 }
 function onQueryKey(e) {
-  if (e.key === 'Enter') { e.target.blur(); ST.suggests = []; runSearch(ST.query); }
+  if (e.key === 'Enter') { e.target.blur(); clearSuggests(); runSearch(ST.query); }
 }
 async function loadSuggests(q) {
   q = String(q || '').trim();
+  const my = ++sugSeq;
   if (q.length < 2) { ST.suggests = []; return; }
   try {
     const r = await fetchT(API_WEB + '/v1/showcase/web/search/suggests?query=' + encodeURIComponent(q));
     const j = await r.json();
-    if (String(ST.query).trim() !== q) return; // устарело
+    if (my !== sugSeq || String(ST.query).trim() !== q) return; // устарело
     ST.suggests = (j.suggests || []).slice(0, 8);
-  } catch (e) { ST.suggests = []; }
+  } catch (e) { if (my === sugSeq) ST.suggests = []; }
 }
 async function runSearch(q) {
   q = String(q || '').trim();
   if (!q) return;
+  const my = ++searchSeq;
   ST.searching = true; ST.results = null;
   try {
     const b = await search(q);
+    if (my !== searchSeq) return;   // этот поиск уже неактуален — не трогаем чужой список
     ST.results = (b && b.content) || [];
-  } catch (e) { ST.results = []; toast('Ошибка: ' + e.message); }
+  } catch (e) {
+    if (my !== searchSeq) return;
+    ST.results = []; toast('Ошибка: ' + e.message);
+  }
   ST.searching = false;
   armSentinel(); // чтобы back вернул из поиска к каталогу, а не вышел
 }
 function pickSuggest(s) {
-  ST.suggests = [];
+  clearSuggests();
   if (s.packageName) navPush({ tab: ST.tab, detail: s.packageName });
   else { ST.query = s.text; runSearch(s.text); }
 }
