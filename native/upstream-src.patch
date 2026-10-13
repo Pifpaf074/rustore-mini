@@ -1,8 +1,6 @@
-diff --git a/default.conf b/default.conf
-index d01c3e2..a6a0674 100644
 --- a/default.conf
 +++ b/default.conf
-@@ -41,4 +41,5 @@ DebugWebView = false
+@@ -41,4 +41,5 @@
  geolocationEnabled = false
  cameraEnabled = false
  microphoneEnabled = false
@@ -10,29 +8,23 @@ index d01c3e2..a6a0674 100644
 \ No newline at end of file
 +showDetailsOnErrorScreen = false
 +managePackages = false
-\ No newline at end of file
-diff --git a/make.sh b/make.sh
-index fece830..8127268 100755
 --- a/make.sh
 +++ b/make.sh
-@@ -277,6 +277,12 @@ apply_config() {
-             "site")
-                 set_site "$value"
+@@ -116,6 +116,11 @@
+                 update_permission "android.permission.RECORD_AUDIO" "$val_clean"
+                 update_permission "android.permission.MODIFY_AUDIO_SETTINGS" "$val_clean"
                  ;;
 +            "managePackages")
 +                # RuStore-расширение: видимость пакетов + установка APK.
-+                set_var "managePackages = $value"
-+                update_permission "android.permission.QUERY_ALL_PACKAGES" "$value"
-+                update_permission "android.permission.REQUEST_INSTALL_PACKAGES" "$value"
++                update_permission "android.permission.QUERY_ALL_PACKAGES" "$val_clean"
++                update_permission "android.permission.REQUEST_INSTALL_PACKAGES" "$val_clean"
 +                ;;
-             *)
-                 set_var "$key = $value"
-                 ;;
-diff --git a/src/AndroidManifest.xml b/src/AndroidManifest.xml
-index f0b2495..7a409b5 100644
+         esac
+     else
+         rm "$tmp_file"
 --- a/src/AndroidManifest.xml
 +++ b/src/AndroidManifest.xml
-@@ -33,5 +33,10 @@
+@@ -32,5 +32,10 @@
              android:name=".MediaPlaybackService"
              android:exported="false"
              android:foregroundServiceType="mediaPlayback" />
@@ -43,11 +35,9 @@ index f0b2495..7a409b5 100644
 +            android:exported="false" />
      </application>
  </manifest>
-diff --git a/src/java/MainActivity.java b/src/java/MainActivity.java
-index 4613997..9763bee 100644
 --- a/src/java/MainActivity.java
 +++ b/src/java/MainActivity.java
-@@ -159,6 +159,12 @@ public class MainActivity extends AppCompatActivity {
+@@ -174,6 +174,12 @@
      int fadeInDuration = 400;
      boolean DebugWebView = false;
  
@@ -60,12 +50,13 @@ index 4613997..9763bee 100644
      boolean geolocationEnabled = false;
      boolean cameraEnabled = false;
      boolean microphoneEnabled = false;
-@@ -390,12 +396,15 @@ public class MainActivity extends AppCompatActivity {
+@@ -407,12 +413,16 @@
              // Pass insets to WebView via CSS custom properties.
              // These names are chosen to be close to the standard CSS env() variables.
              // The web content can then use var(--safe-area-inset-top).
 +            // document.documentElement может быть ещё null (инжект прилетает до парсинга
-+            // <html>) — иначе 3 x "Cannot read properties of null (reading 'style')" в консоли.
++            // <html>, а onPageFinished повторяет его) — иначе 3 x
++            // "Cannot read properties of null (reading 'style')" в консоли на каждом старте.
              String js = String.format(java.util.Locale.US,
 -                "document.documentElement.style.setProperty('--safe-area-inset-top', '%.2fpx');" +
 -                "document.documentElement.style.setProperty('--safe-area-inset-bottom', '%.2fpx');" +
@@ -81,7 +72,7 @@ index 4613997..9763bee 100644
                  top, bottom, left, right
              );
              webview.evaluateJavascript(js, null);
-@@ -547,25 +556,19 @@ public class MainActivity extends AppCompatActivity {
+@@ -645,25 +655,19 @@
          if (webview != null) webview.saveState(outState);
      }
  
@@ -120,23 +111,8 @@ index 4613997..9763bee 100644
  
      /* DownloadManager writes into the public Downloads directory, so before API 29 the enqueue is
         preceded by a WRITE_EXTERNAL_STORAGE round-trip (see onRequestPermissionsResult) */
-@@ -1122,6 +1125,14 @@ public class MainActivity extends AppCompatActivity {
-                 return assetResponse;
+@@ -1694,6 +1698,91 @@
              }
- 
-+            // RuStore: overallInfo требует заголовок RuStoreVerCode — проксируем сами,
-+            // иначе браузер шлёт preflight на каждый уникальный URL и часть отваливается.
-+            if ("backapi.rustore.ru".equals(host)
-+                    && request.getUrl().getPath().startsWith("/applicationData/overallInfo/")) {
-+                WebResourceResponse proxied = ApkInstaller.overallInfoProxy(request.getUrl().toString());
-+                if (proxied != null) return proxied;
-+            }
-+
-             return super.shouldInterceptRequest(view, request);
-         }
- 
-@@ -1383,6 +1394,116 @@ public class MainActivity extends AppCompatActivity {
-             handOffDownload(id, Intent.ACTION_SEND);
          }
  
 +        // ---- RuStore-расширение (наш форк) ------------------------------------
@@ -222,31 +198,6 @@ index 4613997..9763bee 100644
 +        @JavascriptInterface
 +        public void openExternal(String url) {
 +            ApkInstaller.openUrl(context, url);
-+        }
-+
-+        /** GET с телом ответа строкой — обход CORS для version.json на своём сервере.
-+         *  Вызывается на JavaBridge-потоке, поэтому блокирующий сетевой вызов допустим. */
-+        @JavascriptInterface
-+        public String httpGet(String url) {
-+            try {
-+                java.net.HttpURLConnection c =
-+                        (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
-+                c.setConnectTimeout(10000);
-+                c.setReadTimeout(10000);
-+                c.setRequestProperty("Accept", "application/json");
-+                int code = c.getResponseCode();
-+                java.io.InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
-+                if (in == null) return "";
-+                java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
-+                byte[] buf = new byte[8192];
-+                int n;
-+                while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
-+                in.close();
-+                return bos.toString("UTF-8");
-+            } catch (Exception e) {
-+                Log.e("WebToApk", "httpGet failed: " + url, e);
-+                return "";
-+            }
 +        }
 +
          @JavascriptInterface

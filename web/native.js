@@ -12,6 +12,36 @@
 
   function parse(s, fallback) { try { return JSON.parse(s); } catch (e) { return fallback; } }
 
+  // Системные коды установки -> человеческий текст. Иначе в тосте видно
+  // "INSTALL_FAILED_DEPRECATED_SDK_VERSION: App package must target at least SDK...".
+  var INSTALL_ERRORS = {
+    INSTALL_FAILED_DEPRECATED_SDK_VERSION: 'приложение слишком старое для этой версии Android',
+    INSTALL_FAILED_OLDER_SDK: 'приложение слишком старое для этой версии Android',
+    INSTALL_FAILED_UPDATE_INCOMPATIBLE: 'подпись не совпадает с установленным приложением',
+    INSTALL_FAILED_ALREADY_EXISTS: 'приложение уже установлено',
+    INSTALL_FAILED_VERSION_DOWNGRADE: 'на телефоне уже более новая версия',
+    INSTALL_FAILED_INSUFFICIENT_STORAGE: 'не хватает свободного места',
+    INSTALL_FAILED_NO_MATCHING_ABIS: 'APK не подходит процессору телефона',
+    INSTALL_FAILED_USER_RESTRICTED: 'система запретила установку (разрешить неизвестные источники?)',
+    INSTALL_FAILED_INVALID_APK: 'файл APK повреждён',
+    INSTALL_FAILED_INVALID_URI: 'файл APK не найден',
+    INSTALL_FAILED_ABORTED: 'установка отменена',
+    INSTALL_PARSE_FAILED_NOT_APK: 'RuStore отдал не APK',
+    INSTALL_PARSE_FAILED_NO_CERTIFICATES: 'в APK нет подписи',
+    INSTALL_PARSE_FAILED_UNEXPECTED_EXCEPTION: 'не удалось разобрать APK',
+    STATUS_FAILURE_ABORTED: 'установка отменена',
+    STATUS_FAILURE_BLOCKED: 'установку заблокировала система',
+    STATUS_FAILURE_CONFLICT: 'конфликт с установленным приложением',
+    STATUS_FAILURE_STORAGE: 'не хватает свободного места',
+    STATUS_FAILURE_INCOMPATIBLE: 'несовместимо с этой версией Android',
+    STATUS_FAILURE_INVALID: 'некорректный APK'
+  };
+  function installError(msg) {
+    var s = String(msg || '');
+    for (var k in INSTALL_ERRORS) { if (s.indexOf(k) >= 0) return INSTALL_ERRORS[k]; }
+    return s || 'не удалось установить';
+  }
+
   // Колбэки активной установки. Фазы приходят из натива событием 'apk'.
   var pending = null;
 
@@ -21,7 +51,7 @@
     if (phase === 'progress') { if (cb.onProgress) cb.onProgress(Number(data.got) || 0, Number(data.total) || 0); return; }
     if (phase === 'permission' || phase === 'pending') { if (cb.onPending) cb.onPending(phase); return; }
     if (phase === 'installed') { pending = null; cb.resolve({ installed: true }); return; }
-    if (phase === 'error') { pending = null; cb.reject(new Error((data && data.message) || 'ошибка установки')); return; }
+    if (phase === 'error') { pending = null; cb.reject(new Error(installError(data && data.message))); return; }
     // 'confirm' / 'done' — ждём installed либо error (done с session:false = провал сессии).
     if (phase === 'done' && data.session === false) { pending = null; cb.resolve({ installed: false }); }
   };
@@ -69,8 +99,8 @@
     openExternal: function (url) { BT.openExternal(url); },
     clearCache: function () { if (BT.clearAppCache) BT.clearAppCache(); },
     hasNotifications: function () { return BT.hasNotificationPermission(); },
-    requestNotifications: function () { if (BT.requestNotificationPermission) BT.requestNotificationPermission(); },
-    // --- HTTP в обход CORS (для version.json на своём сервере) ---
-    httpGet: function (url) { try { return BT.httpGet(url) || ''; } catch (e) { return ''; } }
+    requestNotifications: function () { if (BT.requestNotificationPermission) BT.requestNotificationPermission(); }
+    // HTTP-мост не нужен: GM_xmlhttpRequest из helpers.js (cookie-less, без CORS)
+    // заменяет и наш бывший httpGet, и нативный прокси overallInfo.
   };
 })();

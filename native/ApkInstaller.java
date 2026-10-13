@@ -15,6 +15,8 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.util.Log;
 import android.webkit.WebView;
@@ -63,6 +65,13 @@ public final class ApkInstaller {
     // заблокирован (фон / другой диалог), система его теряет — сессия висит вечно,
     // а страница ждёт installed/error. Поэтому повторяем запуск при возврате в foreground.
     private static Intent sUserAction;
+    // Номер попытки перезапуска диалога: отложенный повтор должен сработать один раз
+    // и только если установка ещё не завершилась (иначе интент уже устарел).
+    private static int sUserActionTry;
+    // Пауза перед повтором: STATUS_SUCCESS/FAILURE приходит с задержкой ~1-2 с после
+    // применения пакета, а сразу после установки запуск устаревшего интента показывал
+    // ложное «Не удалось установить приложение».
+    private static final long USER_ACTION_RETRY_MS = 4000;
 
     private ApkInstaller() {}
 
@@ -235,9 +244,18 @@ public final class ApkInstaller {
     /** Продолжить отложенную установку после выдачи разрешения / возврата в foreground. */
     public static void retryPending(Activity a, WebView webview) {
         // Сессия уже ждёт подтверждения пользователя, а диалог мог не показаться
-        // (запуск из фона заблокирован / перебит другим диалогом) — показываем снова.
-        if (sUserAction != null) {
-            try { a.startActivity(sUserAction); } catch (Exception e) { Log.e(TAG, "retry user action failed", e); }
+        // (запуск из фона заблокирован / перебит другим диалогом) — показываем снова,
+        // но с задержкой: см. USER_ACTION_RETRY_MS.
+        final Intent ua = sUserAction;
+        final int attempt = ++sUserActionTry;
+        if (ua != null) {
+            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (attempt != sUserActionTry || sUserAction != ua) return; // установка уже завершилась
+                    Log.w(TAG, "retry user action");
+                    try { a.startActivity(ua); } catch (Exception e) { Log.e(TAG, "retry user action failed", e); }
+                }
+            }, USER_ACTION_RETRY_MS);
         }
         final File apk = sPendingApk;
         if (apk == null || !apk.exists()) return;
@@ -464,34 +482,6 @@ public final class ApkInstaller {
             ctx.startActivity(i);
         } catch (Exception e) {
             Log.e(TAG, "openUrl failed: " + url, e);
-        }
-    }
-
-    // ---------------------------------------------------------------- overallInfo
-
-    /** Прокси для overallInfo: RuStore требует заголовок RuStoreVerCode, но с ним
-     *  браузер шлёт CORS-preflight, который сервер часто режет (ERR_FAILED). Делаем
-     *  запрос сами и возвращаем ответ с ACAO * — JS зовёт overallInfo БЕЗ заголовка
-     *  (никакого preflight). */
-    public static android.webkit.WebResourceResponse overallInfoProxy(String url) {
-        try {
-            java.net.HttpURLConnection c =
-                    (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
-            c.setConnectTimeout(12000);
-            c.setReadTimeout(12000);
-            c.setRequestProperty("RuStoreVerCode", "1000");
-            c.setRequestProperty("Accept", "application/json");
-            int code = c.getResponseCode();
-            InputStream in = code >= 400 ? c.getErrorStream() : c.getInputStream();
-            java.util.Map<String, String> h = new java.util.HashMap<>();
-            h.put("Access-Control-Allow-Origin", "*");
-            h.put("Cache-Control", "no-store");
-            String ct = c.getContentType();
-            return new android.webkit.WebResourceResponse(
-                    ct != null ? ct : "application/json", "UTF-8", code, "OK", h, in);
-        } catch (Exception e) {
-            Log.e(TAG, "overallInfo proxy failed: " + url, e);
-            return null; // пусть идёт обычным сетевым путём
         }
     }
 

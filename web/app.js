@@ -11,8 +11,8 @@ const API_NEW = 'https://api.rustore.ru';       // showcase / download-link
 const API_WEB = 'https://web-api.rustore.ru';   // веб-шлюз (подсказки)
 const HDR = { 'RuStoreVerCode': '1000', 'Accept': 'application/json' };
 const THEME_KEY = 'rs_theme_mode'; // 'auto' | 'light' | 'dark'
-// version.json APK лежит на нашем сервере: из bundled-сайта он кросс-доменный,
-// поэтому читаем его нативным httpGet (без CORS).
+// version.json APK лежит на нашем сервере: из bundled-сайта он кросс-доменный —
+// читаем через мост обёртки (GM_xmlhttpRequest), CORS там нет вообще.
 const VER_URL = 'https://example.com/rustore/version.json';
 
 const safeUrl = u => u ? String(u).replace('//static-m.rustore.ru/', '//static.rustore.ru/') : '';
@@ -21,6 +21,7 @@ const fnum  = n => Number(n || 0).toLocaleString('ru-RU');
 const fdate = s => s ? new Date(s).toLocaleDateString('ru-RU') : '—';
 
 // fetch с таймаутом: без него офлайн запросы висят бесконечно («читаем установленные…»).
+// Это только ФОЛБЭК: в приложении все запросы идут через мост (см. httpRaw).
 const NET_TIMEOUT = 12000;
 async function fetchT(url, opts) {
   const ctl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
@@ -34,11 +35,41 @@ const netError = (e) => /fetch|network|abort|timeout|load failed|failed to load/
 // ("Couldn't find required data..."), поэтому ориентируемся на HTTP-статус.
 const is404 = (e) => !!(e && (e.status === 404 || /404/.test(String(e.message || ''))));
 
-// Простые GET без кастомных заголовков (не требуют CORS-preflight).
-// Один разбор ответа для всех API. strict: у backapi ошибка — любой code кроме 'OK',
-// у нового API — только 'ERROR'.
+// --- HTTP через мост обёртки -------------------------------------------------
+// helpers.js даёт GM_xmlhttpRequest, который ходит нативным httpRequest: без CORS
+// (никаких preflight), без cookie, с любыми заголовками и телом. Возвращаем объект,
+// похожий на Response — {ok, status, json()} — чтобы код ниже не различал пути.
+function gmRequest(url, opts) {
+  return new Promise(function (resolve, reject) {
+    let req, done = false;
+    const t = setTimeout(function () { done = true; try { req.abort(); } catch (e) {} reject(new Error('timeout')); }, NET_TIMEOUT);
+    req = GM_xmlhttpRequest({
+      method: (opts && opts.method) || 'GET',
+      url: url,
+      headers: (opts && opts.headers) || {},
+      data: (opts && opts.body != null) ? String(opts.body) : '',
+      onload: function (res) {
+        if (done) return;
+        clearTimeout(t);
+        const text = res.responseText || '';
+        resolve({
+          ok: res.status >= 200 && res.status < 300,
+          status: res.status,
+          json: function () { try { return Promise.resolve(JSON.parse(text)); } catch (e) { return Promise.resolve({}); } },
+        });
+      },
+      onerror: function (e) { if (done) return; clearTimeout(t); reject(new Error('network: ' + ((e && e.error) || 'error'))); },
+      ontimeout: function () { if (done) return; clearTimeout(t); reject(new Error('timeout')); },
+    });
+  });
+}
+const hasBridge = () => typeof GM_xmlhttpRequest === 'function';
+async function httpRaw(url, opts) { return hasBridge() ? gmRequest(url, opts) : fetchT(url, opts); }
+
+// Один разбор ответа для всех API (через мост, см. httpRaw). strict: у backapi
+// ошибка — любой code кроме 'OK', у нового API — только 'ERROR'.
 async function jfetch(url, opts, strict) {
-  const r = await fetchT(url, opts);
+  const r = await httpRaw(url, opts);
   const j = await r.json().catch(() => ({}));
   const bad = !r.ok || (j && j.code && (strict ? j.code !== 'OK' : j.code === 'ERROR'));
   if (bad) {
@@ -53,7 +84,7 @@ async function api(path, opts) {
   if (o.body != null && !o.headers) o.headers = { 'Content-Type': 'application/json' };
   return (await jfetch(API + path, o, true)).body;
 }
-// Запросы, где обязателен RuStoreVerCode (download-link) — добавляем заголовок (с preflight).
+// Запросы, где обязателен RuStoreVerCode (overallInfo, download-link).
 async function apiH(path, opts) {
   const o = Object.assign({ headers: Object.assign({}, HDR) }, opts || {});
   if (o.body != null && !o.headers['Content-Type']) o.headers['Content-Type'] = 'application/json';
@@ -62,9 +93,8 @@ async function apiH(path, opts) {
 async function getNew(path) { return jfetch(API_NEW + path, null, false); }
 const search = (q, page, size) =>
   api('/applicationData/apps?pageNumber=' + (page || 0) + '&pageSize=' + (size || 20) + '&query=' + encodeURIComponent(q));
-// overallInfo требует заголовок RuStoreVerCode, но его добавляет нативный слой
-// (перехват в shouldInterceptRequest) — из JS шлём БЕЗ заголовка, без preflight.
-const info = pkg => api('/applicationData/overallInfo/' + encodeURIComponent(pkg));
+// overallInfo требует заголовок RuStoreVerCode — с мостом это просто, preflight не бывает.
+const info = pkg => apiH('/applicationData/overallInfo/' + encodeURIComponent(pkg));
 const comments = (pkg, page, size) =>
   api('/comment/comment?packageName=' + encodeURIComponent(pkg) + '&sortBy=NEW_FIRST&pageNumber=' + (page || 0) + '&pageSize=' + (size || 10));
 const stars = n => { n = Math.max(0, Math.min(5, Number(n) || 0)); return '★★★★★'.slice(0, n) + '☆☆☆☆☆'.slice(0, 5 - n); };
@@ -82,7 +112,7 @@ function devParams() {
 async function downloadLink(appId, firstInstall) {
   const body = JSON.stringify(Object.assign({ appId: appId, firstInstall: !!firstInstall, withoutSplits: true }, devParams()));
   try {
-    const r = await fetchT(API_NEW + '/v3/showcase/apps/download-link',
+    const r = await httpRaw(API_NEW + '/v3/showcase/apps/download-link',
       { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, HDR), body: body });
     if (r.ok) return await r.json();
   } catch (e) { /* упал -> старый путь */ }
@@ -210,7 +240,9 @@ let toastT = null;
 function toast(m) {
   ST.toast = String(m);
   clearTimeout(toastT);
-  toastT = setTimeout(function () { ST.toast = ''; }, 2800);
+  // Длительность — от длины: короткое подтверждение читается за секунду, а текст
+  // ошибки установки — нет (раньше всё исчезало через 2.8 с).
+  toastT = setTimeout(function () { ST.toast = ''; }, Math.min(10000, 2600 + String(m).length * 45));
 }
 function savedThemeMode() { try { const v = localStorage.getItem(THEME_KEY); return (v === 'light' || v === 'dark') ? v : 'auto'; } catch (e) { return 'auto'; } }
 // Системная тема: сначала натив (WebView не всегда отдаёт prefers-color-scheme), потом matchMedia.
@@ -400,7 +432,7 @@ async function loadSuggests(q) {
   const my = ++sugSeq;
   if (q.length < 2) { ST.suggests = []; return; }
   try {
-    const r = await fetchT(API_WEB + '/v1/showcase/web/search/suggests?query=' + encodeURIComponent(q));
+    const r = await httpRaw(API_WEB + '/v1/showcase/web/search/suggests?query=' + encodeURIComponent(q));
     const j = await r.json();
     if (my !== sugSeq || String(ST.query).trim() !== q) return; // устарело
     ST.suggests = (j.suggests || []).slice(0, 8);
@@ -479,11 +511,24 @@ function installState(i) {
   if (cur >= 0 && Number(i.versionCode) > cur) return 'update';
   return 'open';
 }
+// Запись установленного приложения (нужна для признака «заморожено»).
+// Список установленных грузится лениво — если его ещё нет, подгружаем.
+function installedRec(pkg) {
+  if (!ST.installed) refreshInstalled();
+  const arr = ST.installed || [];
+  for (let k = 0; k < arr.length; k++) if (arr[k].packageName === pkg) return arr[k];
+  return null;
+}
 async function doDownload(i) {
   const pkg = i.packageName;
   if (installBusy()) { toast('Другая установка ещё идёт'); return; }
+  // Обновление пакета системно снимает «заморозку» (enabled 2→0), поэтому замороженное
+  // приложение надо разморозить до установки и заморозить обратно после (как в строке списка).
+  const wasFrozen = hailOk() && isFrozen(installedRec(pkg));
+  let manual = false;   // откат на системный установщик — статус установки нам неизвестен
   setBusy(pkg, 'Получаем ссылку…');
   try {
+    if (wasFrozen) { hail('UNFREEZE', pkg); await sleep(900); }
     const apk = await resolveApk(i.appId, true, 'RuStore не отдал ссылку (внешний источник?)', i.signature);
     if (canNative()) {
       const res = await installApk(apk, pkg + '-' + i.versionCode + '.apk', {
@@ -496,7 +541,8 @@ async function doDownload(i) {
       // installed:true — PackageInstaller-сессия вернула SUCCESS (промис ждёт реального конца
       // установки, не «открытия установщика»). installed:false — откат на ACTION_VIEW: статус
       // нам не придёт, поэтому ничего не утверждаем.
-      toast(res && res.installed === false ? 'Открыт системный установщик — подтвердите установку' : 'Установлено');
+      if (res && res.installed === false) manual = true;
+      toast(manual ? 'Открыт системный установщик — подтвердите установку' : 'Установлено');
     } else {
       const a = document.createElement('a');
       a.href = apk.url; a.rel = 'noopener'; a.download = '';
@@ -504,7 +550,11 @@ async function doDownload(i) {
       toast('Загрузка началась');
     }
   } catch (e) { toast('Ошибка: ' + e.message); }
-  setBusy(pkg, null);
+  finally {
+    setBusy(pkg, null);
+    // Морозим обратно только если реально дождались конца установки.
+    if (wasFrozen && !manual) { await sleep(1200); hail('FREEZE', pkg); }
+  }
 }
 
 // ------------------------------------------------------------------ обновления
@@ -710,9 +760,9 @@ async function checkSelfUpdate() {
   const N = window.Native;
   if (!N || !N.appInfo) return;
   try {
-    const body = N.httpGet ? N.httpGet(VER_URL) : '';
-    if (!body) return;
-    const j = JSON.parse(body);
+    const r = await httpRaw(VER_URL, { headers: { 'Accept': 'application/json' } });
+    if (!r.ok) return;
+    const j = await r.json();
     const me = N.appInfo() || {};
     if (Number(j.versionCode) > Number(me.versionCode || 0)) ST.selfUpd = j;
   } catch (e) { /* нет version.json — не страшно */ }
@@ -1114,7 +1164,7 @@ const CMTROW = memo((c) => {
 });
 
 const TOASTBAR = memo(() => {
-  DIV({ class: 'toast' + (ST.toast ? ' show' : '') }, ST.toast);
+  DIV({ class: 'toast' + (ST.toast ? ' show' : ''), onClick: () => toast('') }, ST.toast);
 });
 
 // ------------------------------------------------------------------ старт
