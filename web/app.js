@@ -380,6 +380,9 @@ function onQuery(e) {
     clearSearch();
     if (had && !navStack.length && navArmed) history.back(); // снять сторожевой энти без «пустого» back
   }
+  // Набранный запрос — уже «уровень»: без сторожевого энтри back уходил в натив,
+  // webView.canGoBack() = false и приложение закрывалось (хотя есть что «отматывать»).
+  armSentinel();
   clearTimeout(qT);
   qT = setTimeout(function () { loadSuggests(v); }, 300);
 }
