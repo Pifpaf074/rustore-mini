@@ -485,7 +485,7 @@ async function doDownload(i) {
   try {
     const apk = await resolveApk(i.appId, true, 'RuStore не отдал ссылку (внешний источник?)', i.signature);
     if (canNative()) {
-      await installApk(apk, pkg + '-' + i.versionCode + '.apk', {
+      const res = await installApk(apk, pkg + '-' + i.versionCode + '.apk', {
         onProgress: function (got, total) { if (ST.dlPkg === pkg) ST.dlLabel = total ? Math.round(got / total * 100) + '%' : mb(got); },
         onPending: function (phase) {
           if (ST.dlPkg !== pkg) return;
@@ -493,7 +493,10 @@ async function doDownload(i) {
           else { ST.dlLabel = 'Разверните приложение'; toast('Скачано — вернитесь в приложение для установки'); }
         },
       });
-      toast('Установщик открыт');
+      // installed:true — PackageInstaller-сессия вернула SUCCESS (промис ждёт реального конца
+      // установки, не «открытия установщика»). installed:false — откат на ACTION_VIEW: статус
+      // нам не придёт, поэтому ничего не утверждаем.
+      toast(res && res.installed === false ? 'Открыт системный установщик — подтвердите установку' : 'Установлено');
     } else {
       const a = document.createElement('a');
       a.href = apk.url; a.rel = 'noopener'; a.download = '';
@@ -627,16 +630,26 @@ async function updateOne(it, btn, prog) {
   if (btn) { btn.disabled = true; btn.textContent = '…'; }
   const wasFrozen = isFrozen(it.a) && hailOk();
   const label = it.a.label || pkg;
+  let manual = false;   // откат на системный установщик — статус установки нам неизвестен
   try {
     if (wasFrozen) { hail('UNFREEZE', pkg); await sleep(900); }
     const apk = await resolveApk(it.v.appId, false, it.v.aggregatorInfo ? 'внешний источник — нет прямого APK' : 'RuStore не отдал ссылку', it.v.signature);
-    await installApk(apk, pkg + '.apk', {
+    const res = await installApk(apk, pkg + '.apk', {
       onProgress: function (got, total) { say(total ? Math.round(got / total * 100) + '%' : '…'); },
       onPending: function (phase) {
         if (phase === 'permission') { say('Разрешите установку'); toast('Разрешите установку из этого источника'); }
         else { say('Разверните'); toast('Скачано — вернитесь в приложение для установки'); }
       },
     });
+    if (res && res.installed === false) {
+      // PackageInstaller-сессия не открылась -> ACTION_VIEW: система сама спросит подтверждение,
+      // а нам статус не придёт. Поэтому версию не проверяем, строку не убираем и НЕ морозим
+      // обратно — иначе заморозим приложение, пока его ещё ставят.
+      manual = true;
+      if (btn) { btn.disabled = false; btn.textContent = 'Обновить'; }
+      toast(label + ': подтвердите установку в системном установщике');
+      return 'manual';
+    }
     await sleep(700);
     const now = window.Native.installedVersion ? Number(window.Native.installedVersion(it.a.packageName)) : -1;
     if (now < 0 || now >= Number(it.v.versionCode)) {
@@ -654,8 +667,9 @@ async function updateOne(it, btn, prog) {
     if (btn) { btn.disabled = false; btn.textContent = 'Обновить'; }
   } finally {
     if (ST.dlPkg === pkg) { ST.dlPkg = null; ST.dlLabel = ''; }
-    // Вернуть заморозку (даже при ошибке) — если она была.
-    if (wasFrozen) { await sleep(1200); hail('FREEZE', pkg); }
+    // Вернуть заморозку (даже при ошибке) — если она была и если мы реально дождались
+    // конца установки (иначе заморозим приложение прямо во время установки).
+    if (wasFrozen && !manual) { await sleep(1200); hail('FREEZE', pkg); }
   }
 }
 async function updateAll() {
@@ -667,7 +681,11 @@ async function updateAll() {
     const label = list[i].a.label || list[i].a.packageName;
     const head = 'Обновляем ' + label + '  ·  ' + (i + 1) + '/' + list.length;
     ST.updBusy = head;
-    try { await updateOne(list[i], null, function (s) { ST.updBusy = head + '  ·  ' + s; }); } catch (e) {}
+    let st;
+    try { st = await updateOne(list[i], null, function (s) { ST.updBusy = head + '  ·  ' + s; }); } catch (e) {}
+    // Откат на системный установщик: подтверждение ждёт пользователь — не открываем
+    // следующий установщик поверх и не считаем это успехом.
+    if (st === 'manual') { ST.updBusy = ''; ST.updAllBusy = false; toast('Дальше — вручную: подтвердите установку'); return; }
   }
   ST.updBusy = ''; ST.updAllBusy = false;
   toast('Готово');
