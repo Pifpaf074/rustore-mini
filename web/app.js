@@ -126,6 +126,11 @@ async function infoRetry(pkg, times) {
 // Кэш info на время проверки: повторные «Проверить» дают стабильный список.
 const UPD_TTL = 5 * 60 * 1000;
 const updCache = {};
+// Маркер «проверить не удалось» (сеть) в результатах checkUpdates: строку не трогаем.
+const KEEP = {};
+// Пакеты, обновлённые во время текущей проверки: их строки не воскрешаем —
+// ответ мог быть получен ДО установки, а строка уже убрана updateOne.
+let updDone = null;
 async function infoCached(pkg) {
   const c = updCache[pkg], now = Date.now();
   if (c && now - c.ts < UPD_TTL) return c.v;
@@ -560,35 +565,35 @@ async function checkUpdates(force) {
     // Порядок фиксируем ДО опроса (по названию) и только ДОПИСЫВАЕМ в конец:
     // найденное видно сразу, но строки не переставляются — юзер не промахнётся кнопкой.
     const order = apps.slice().sort((x, y) => String(x.label || '').localeCompare(String(y.label || '')));
-    // Строки, уже показанные (повторная проверка), НЕ сносим: обновляем их на месте.
-    // Новые находки дописываются в конец — ничего не переставляется и не мигает.
-    let list = (ST.updates || []).slice();
-    const pos = {};
-    for (let i = 0; i < list.length; i++) pos[list[i].a.packageName] = i;
+    // Строки уже удалённых приложений убираем сразу: order строится из текущих
+    // установленных, и больше их никто не тронул бы — висели бы до перезапуска.
+    const have = new Set(apps.map(a => a.packageName));
+    ST.updates = (ST.updates || []).filter(x => have.has(x.a.packageName));
     const results = new Array(order.length);
     let commitAt = 0, done = 0, netFail = 0;
-    const flush = () => { // выдаём строго по порядку (ответы приходят не по порядку)
+    // Выдаём строго по порядку (ответы приходят не по порядку) и правим АКТУАЛЬНЫЙ
+    // ST.updates, а не локальную копию: иначе одиночное обновление, сделанное во
+    // время проверки, «воскресало» следующим flush'ем из старой копии.
+    const flush = () => {
       while (commitAt < results.length && results[commitAt] !== undefined) {
-        const r = results[commitAt], a = order[commitAt];
+        const r = results[commitAt], pkg = order[commitAt].packageName;
         commitAt++;
-        const at = pos[a.packageName];
-        if (r) {
-          if (at === undefined) { pos[a.packageName] = list.length; list.push(r); }
-          else list[at] = r;
-        } else if (at !== undefined) { // обновление пропало — убираем строку
-          list.splice(at, 1);
-          for (const k in pos) if (pos[k] > at) pos[k]--;
-          delete pos[a.packageName];
-        }
-        ST.updates = list.slice(); // новая ссылка -> реактивность
+        if (r === KEEP) continue;   // не смогли проверить — найденную строку не сносим
+        if (updDone && updDone.has(pkg)) continue;   // только что обновили — не возвращаем
+        const list = (ST.updates || []).slice();
+        const at = list.findIndex(x => x.a.packageName === pkg);
+        if (r) { if (at < 0) list.push(r); else list[at] = r; }  // новое — в конец
+        else if (at >= 0) list.splice(at, 1);                    // обновление пропало
+        ST.updates = list;          // новая ссылка -> реактивность
       }
     };
+    updDone = new Set();   // пакеты, обновлённые во время этой проверки (см. flush)
     await pool(order, 3, async function (a, i) {
-      let item = null;
+      let item = null, failed = false;
       try {
         let v = null;
         try { v = await infoCached(a.packageName); }
-        catch (e) { if (!is404(e)) netFail++; }
+        catch (e) { if (!is404(e)) { netFail++; failed = true; } }   // 404 — приложение ушло из RuStore
         if (v && Number(v.versionCode) > Number(a.versionCode)) {
           let compatible = true;
           if (v.signature && N.installedSigner) {
@@ -597,15 +602,17 @@ async function checkUpdates(force) {
           }
           item = { a: a, v: v, compatible: compatible };
         }
-      } catch (e) { /* одна битая запись не должна ломать всю проверку */ }
-      results[i] = item;
+      } catch (e) { failed = true; }  // неожиданная ошибка — строку тоже не сносим
+      results[i] = failed ? KEEP : item;
       done++;
-      ST.updProgress = 'Проверено ' + done + '/' + order.length + (list.length ? '  ·  найдено: ' + list.length : '');
+      const found = (ST.updates || []).length;
+      ST.updProgress = 'Проверено ' + done + '/' + order.length + (found ? '  ·  найдено: ' + found : '');
       flush();
     });
     flush();
     ST.updErr = netFail === 0 ? '' : (netFail >= order.length ? 'Нет соединения с RuStore' : ('Не удалось проверить (сеть): ' + netFail));
   } catch (e) { toast('Ошибка: ' + e.message); ST.updErr = 'Ошибка: ' + e.message; }
+  updDone = null;
   ST.updChecking = false;
 }
 const updAllReady = () => !!(ST.updates && ST.updates.some(x => x.compatible));
@@ -634,8 +641,9 @@ async function updateOne(it, btn, prog) {
     const now = window.Native.installedVersion ? Number(window.Native.installedVersion(it.a.packageName)) : -1;
     if (now < 0 || now >= Number(it.v.versionCode)) {
       // now < 0 — версию не прочитать (нет доступа к списку приложений); считаем, что установка прошла.
-      delete updCache[it.a.packageName]; // сбросить кэш info, иначе приложение всплывёт снова
-      ST.updates = (ST.updates || []).filter(x => x.a.packageName !== it.a.packageName);
+      delete updCache[pkg]; // сбросить кэш info, иначе приложение всплывёт снова
+      if (updDone) updDone.add(pkg);   // не даём текущей проверке вернуть эту строку
+      ST.updates = (ST.updates || []).filter(x => x.a.packageName !== pkg);
       toast(now < 0 ? (label + ' — установлено (проверить не удалось)') : (label + ' обновлён'));
     } else {
       toast('Установка не применилась: ' + label);
