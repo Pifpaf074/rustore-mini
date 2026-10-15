@@ -529,6 +529,8 @@ function installedRec(pkg) {
 }
 async function doDownload(i) {
   const pkg = i.packageName;
+  const label = i.appName || i.label || pkg;
+  const wasUpdate = installState(i) === 'update';
   if (installBusy()) { toast('Другая установка ещё идёт'); return; }
   // Обновление пакета системно снимает «заморозку» (enabled 2→0), поэтому замороженное
   // приложение надо разморозить до установки и заморозить обратно после (как в строке списка).
@@ -549,8 +551,22 @@ async function doDownload(i) {
       // installed:true — PackageInstaller-сессия вернула SUCCESS (промис ждёт реального конца
       // установки, не «открытия установщика»). installed:false — откат на ACTION_VIEW: статус
       // нам не придёт, поэтому ничего не утверждаем.
-      if (res && res.installed === false) manual = true;
-      toast(manual ? 'Открыт системный установщик — подтвердите установку' : 'Установлено');
+      if (res && res.installed === false) {
+        manual = true;
+        toast('Открыт системный установщик — подтвердите установку');
+      } else {
+        await sleep(700);
+        const now = window.Native.installedVersion ? Number(window.Native.installedVersion(pkg)) : -1;
+        if (now < 0 || now >= Number(i.versionCode)) {
+          // Та же уборка, что и в строке списка: сбросить кэш info, не дать текущей проверке
+          // вернуть строку обратно и убрать её из списка обновлений.
+          delete updCache[pkg];
+          if (updDone) updDone.add(pkg);
+          ST.updates = (ST.updates || []).filter(x => x.a.packageName !== pkg);
+          toast(now < 0 ? (label + ' — установлено (проверить не удалось)')
+                        : (wasUpdate ? label + ' обновлён' : label + ' установлен'));
+        } else toast('Установка не применилась: ' + label);
+      }
     } else {
       const a = document.createElement('a');
       a.href = apk.url; a.rel = 'noopener'; a.download = '';
