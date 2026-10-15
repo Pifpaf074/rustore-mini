@@ -3,7 +3,9 @@
 # (confs/rustore-dev, mainURL из локального webapk.local.conf).
 #
 # Релизный APK НЕ использует этот сервер для UI: сайт вшит в APK (site = site).
-# Здесь же лежит только APK + version.json (для самообновления).
+# Самообновление приложения тоже не здесь: version.json и APK берутся из
+# GitHub Releases (см. release.sh). На этот сервер копия кладётся только как
+# зеркало — чтобы сборки, которые ходят сюда за version.json, переехали на GitHub.
 #
 #   ./deploy.sh [DST]     DST по умолчанию /work/rustore
 #

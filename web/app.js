@@ -11,12 +11,13 @@ const API_NEW = 'https://api.rustore.ru';       // showcase / download-link
 const API_WEB = 'https://web-api.rustore.ru';   // веб-шлюз (подсказки)
 const HDR = { 'RuStoreVerCode': '1000', 'Accept': 'application/json' };
 const THEME_KEY = 'rs_theme_mode'; // 'auto' | 'light' | 'dark'
-// version.json APK лежит на нашем сервере: из bundled-сайта он кросс-доменный —
-// читаем через мост обёртки (GM_xmlhttpRequest), CORS там нет вообще.
-// Адрес version.json для самообновления задаётся ЛОКАЛЬНО (web/config.local.js,
-// он не в git): в публичном репо домена сервера раздачи нет. Если не задан —
-// самообновление просто пропускается.
-const VER_URL = window.RS_VER_URL || '';
+// version.json для самообновления лежит в GitHub Releases: стабильный URL
+// .../releases/latest/download/version.json всегда отдаёт ассет последнего релиза,
+// а внутри — такой же стабильный URL на APK. Из bundled-сайта это кросс-доменный
+// запрос — читаем через мост обёртки (GM_xmlhttpRequest), CORS там нет вообще.
+// Переопределяется через window.RS_VER_URL (локальный web/config.local.js).
+const VER_URL = window.RS_VER_URL ||
+  'https://github.com/Pifpaf074/rustore-mini/releases/latest/download/version.json';
 
 const safeUrl = u => u ? String(u).replace('//static-m.rustore.ru/', '//static.rustore.ru/') : '';
 const mb    = n => n ? (n / 1048576).toFixed(1) + ' МБ' : '—';

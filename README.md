@@ -6,8 +6,8 @@ RuStore видит только ваш IP и UA WebView.
 
 Web-UI вшит в APK и живёт в WebView; запросы к RuStore идут через нативный мост
 (без CORS и preflight), скачивание — системный `DownloadManager`, установка —
-`PackageInstaller`. Свой сервер нужен только чтобы раздавать APK и `version.json`
-(самообновление приложения).
+`PackageInstaller`. Своего сервера не нужно вообще: самообновление берётся из
+GitHub Releases (`release.sh` публикует APK и `version.json`).
 
 ## Возможности
 
@@ -50,6 +50,19 @@ cd /work/4 && ./make.sh build confs/rustore-dev/webapk.conf
 `window.RS_VER_URL` (локальный `web/config.local.js`), dev-конфиг — из
 `confs/rustore-dev/webapk.local.conf`; оба файла в `.gitignore`.
 
+## Релиз и автообновление
+
+```bash
+# поднять versionCode/versionName в confs/rustore/webapk.conf, потом:
+MIRROR_DIR=/work/rustore ./release.sh     # собрать и опубликовать на GitHub Releases
+```
+
+`release.sh` кладёт в релиз `rustore-mini.apk` и `version.json`, а приложение читает
+стабильный URL `https://github.com/Pifpaf074/rustore-mini/releases/latest/download/version.json`
+и качает APK оттуда же. `MIRROR_DIR` — необязательное зеркало на свой сервер (нужно
+только чтобы старые сборки, которые ходили за `version.json` туда, один раз переехали
+на GitHub).
+
 ## Что где лежит
 
 | Путь | Что |
@@ -61,7 +74,8 @@ cd /work/4 && ./make.sh build confs/rustore-dev/webapk.conf
 | `rustore.py` | CLI к API RuStore: `search`, `info`, `url`, `download`, `trends`, `comments` |
 | `tests/` | headless-тесты UI (chromium + CDP) |
 | `docs/` | `api.md` — разбор API, `hail.md` — Hail, `alternatives.md` — другие варианты |
-| `deploy.sh` | выкладка `web/*` на сервер раздачи |
+| `deploy.sh` | выкладка `web/*` на сервер раздачи (только для dev-сборки) |
+| `release.sh` | сборка + публикация релиза на GitHub Releases (автообновление) |
 
 CLI работает без зависимостей (только stdlib):
 
