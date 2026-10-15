@@ -1,0 +1,20 @@
+# Headless-тесты UI
+
+Гоняются без устройства и без сборки APK: `python3 -m http.server 8099` в `web/` +
+`chromium --headless --no-sandbox --disable-gpu --remote-debugging-port=9223
+--user-data-dir=/tmp/cr-detail`, затем `BASE=http://127.0.0.1:8099 node <тест>.mjs`.
+Негативный контроль — тот же тест с `BASE=http://127.0.0.1:8098` на старом `app.js`.
+
+| Тест | Что проверяет |
+|---|---|
+| `ptrsync.mjs` | pull-to-refresh запрещается, пока прокручен оверлей карточки (`.dbody`), и возвращается в начале/при закрытии |
+
+Исторические тесты (жили в `/tmp`, потеряны при перезагрузке — воссоздавать по мере
+надобности): `updlist` (список обновлений: 404/сеть/удаление), `updrace` (гонки
+проверки), `installphase` (промис резолвится по `installed`, а не по открытию
+установщика), `rowbusy` (занятость строки живёт в состоянии и переживает
+перерисовку), `cardhail` (карточка размораживает и морозит обратно), `detailrace`,
+`searchrace`, `backsentinel`, `selfupd`, `visjump2`.
+
+Важно: `const`/`let` из `app.js` не видны через CDP (indirect eval) — проверять
+через DOM. Стаб ставится через `Page.addScriptToEvaluateOnNewDocument`.

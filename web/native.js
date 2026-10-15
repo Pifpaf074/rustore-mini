@@ -65,8 +65,14 @@
     setTimeout(function () { try { BT.setPullToRefreshRefreshing(false); } catch (e) {} }, 700);
     return true;
   };
+  // Свои скроллеры (оверлей карточки) натив не видит: SwipeRefreshLayout смотрит только
+  // скролл самого WebView. Поэтому страница сама говорит, можно ли тянуть вниз.
+  function setPtrEnabled(on) { try { if (BT.setPullToRefreshEnabled) BT.setPullToRefreshEnabled(!!on); } catch (e) {} }
+  window.__ptrSync = function (scrolled) { setPtrEnabled(!scrolled); };
 
   window.Native = {
+    // --- pull-to-refresh (управление из app.js) ---
+    setPtrEnabled: setPtrEnabled,
     // --- установка APK ---
     installApk: function (opts) {
       return new Promise(function (resolve, reject) {

@@ -277,6 +277,12 @@ window.__refreshCurrent = function () {
   if (ST.tab === 'upd') { if (ST.updTab === 'installed') refreshInstalled(); else checkUpdates(true); return; }
   loadHome(kindOf(ST.tab));
 };
+// Pull-to-refresh должен замолчать, когда прокручен СВОЙ скроллер (оверлей карточки):
+// натив видит только скролл WebView и иначе дёргает обновление при листании описания вверх.
+function ptrSync(scrolled) {
+  const N = window.Native;
+  if (N && N.setPtrEnabled) N.setPtrEnabled(!scrolled);
+}
 function launch(pkg, frozen) {
   if (frozen && hailOk() && hail('LAUNCH', pkg)) return; // Hail сам разморозит и запустит
   const N = window.Native;
@@ -465,6 +471,7 @@ function pickSuggest(s) {
 let detailSeq = 0;
 async function openDetail(pkg) {
   const my = ++detailSeq;
+  ptrSync(false);   // карточка открывается сверху — жест снова доступен
   ST.detail = null; ST.detailPkg = pkg; ST.detailErr = ''; ST.detailLoading = true;
   ST.comments = null; ST.commentsLoading = false; ST.commentsErr = ''; ST.commentsPage = 0; ST.commentsTotal = 0;
   let d = null, err = '';
@@ -478,6 +485,7 @@ async function openDetail(pkg) {
 // карточку заново — «закрыл, а она открылась». Счётчик гасит ответы в полёте.
 function hideDetail() {
   detailSeq++;
+  ptrSync(false);   // оверлея больше нет — вернуть жест на место
   ST.detail = null; ST.detailErr = ''; ST.detailLoading = false;
   ST.comments = null; ST.commentsLoading = false; ST.commentsErr = '';
 }
@@ -1067,7 +1075,7 @@ const DETAILVIEW = memo(() => {
 
 const DETAILBODY = memo((i) => {
   const sh = shotlist(i);
-  DIV({ class: 'dbody' }) {
+  DIV({ class: 'dbody', onScroll: (e) => ptrSync(e.target.scrollTop > 0) }) {
     DIV({ class: 'dtop' }) {
       if (i.iconUrl) IMG({ class: 'dic', src: safeUrl(i.iconUrl), referrerpolicy: 'no-referrer', alt: '' })
       DIV({ class: 'dinfo' }) {
