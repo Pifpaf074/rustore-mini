@@ -32,12 +32,19 @@ async function fetchT(url, opts) {
   const o = Object.assign({}, opts || {});
   if (ctl) o.signal = ctl.signal;
   const t = setTimeout(function () { if (ctl) ctl.abort(); }, NET_TIMEOUT);
-  try { return await fetch(url, o); } finally { clearTimeout(t); }
+  try {
+    const r = await fetch(url, o);
+    // Тело читаем ДО снятия таймера: иначе заголовки пришли (таймер снят), а чтение
+    // r.json() может висеть вечно. Возвращаем тот же минимальный вид, что gmRequest.
+    const text = await r.text();
+    return { ok: r.ok, status: r.status, json: function () { try { return Promise.resolve(JSON.parse(text)); } catch (e) { return Promise.resolve({}); } } };
+  } finally { clearTimeout(t); }
 }
 const netError = (e) => /fetch|network|abort|timeout|load failed|failed to load/i.test(String((e && e.message) || e));
 // 404 = «нет в RuStore», а не сетевая ошибка. Тело ошибки RuStore НЕ содержит «404»
-// ("Couldn't find required data..."), поэтому ориентируемся на HTTP-статус.
-const is404 = (e) => !!(e && (e.status === 404 || /404/.test(String(e.message || ''))));
+// ("Couldn't find required data..."), а статус jfetch проставляет всегда — по нему и решаем.
+// Регулярку по message держать нельзя: она ловит любое «404» в тексте (например, в id).
+const is404 = (e) => !!(e && e.status === 404);
 
 // --- HTTP через мост обёртки -------------------------------------------------
 // helpers.js даёт GM_xmlhttpRequest, который ходит нативным httpRequest: без CORS
@@ -94,7 +101,11 @@ async function apiH(path, opts) {
   if (o.body != null && !o.headers['Content-Type']) o.headers['Content-Type'] = 'application/json';
   return (await jfetch(API + path, o, true)).body;
 }
-async function getNew(path) { return jfetch(API_NEW + path, null, false); }
+async function getNew(path, hdr) {
+  // Часть ручек api.rustore.ru (например /v2/showcase/popular/apps) без заголовка
+  // RuStoreVerCode отвечает 400 — тогда как sections работает и без него.
+  return jfetch(API_NEW + path, hdr ? { headers: Object.assign({}, HDR) } : null, false);
+}
 const search = (q, page, size) =>
   api('/applicationData/apps?pageNumber=' + (page || 0) + '&pageSize=' + (size || 20) + '&query=' + encodeURIComponent(q));
 // overallInfo требует заголовок RuStoreVerCode — с мостом это просто, preflight не бывает.
@@ -158,6 +169,8 @@ async function infoRetry(pkg, times) {
   throw last;
 }
 // Кэш info на время проверки: повторные «Проверить» дают стабильный список.
+// Храним ПРОМИС, а не значение: одновременные запросы одного пакета дедуплицируются,
+// и ts ставится по факту ответа, а не до await.
 const UPD_TTL = 5 * 60 * 1000;
 const updCache = {};
 // Маркер «проверить не удалось» (сеть) в результатах checkUpdates: строку не трогаем.
@@ -165,17 +178,30 @@ const KEEP = {};
 // Пакеты, обновлённые во время текущей проверки: их строки не воскрешаем —
 // ответ мог быть получен ДО установки, а строка уже убрана updateOne.
 let updDone = null;
-async function infoCached(pkg) {
-  const c = updCache[pkg], now = Date.now();
-  if (c && now - c.ts < UPD_TTL) return c.v;
-  const v = await infoRetry(pkg, 4);
-  updCache[pkg] = { v: v, ts: now };
-  return v;
+function infoCached(pkg) {
+  const c = updCache[pkg];
+  if (c && Date.now() - c.ts < UPD_TTL) return c.p;
+  const p = infoRetry(pkg, 4).then(function (v) {
+    updCache[pkg] = { p: Promise.resolve(v), ts: Date.now() };
+    return v;
+  }, function (e) { delete updCache[pkg]; throw e; });
+  updCache[pkg] = { p: p, ts: Date.now() };
+  return p;
 }
 
 const canNative = () => !!(window.Native && window.Native.installApk);
 // Hail (freeze-менеджер) — публичный API через экспортированную ApiActivity.
-const hailOk = () => !!(window.Native && window.Native.hailAvailable && window.Native.hailAvailable());
+// hailAvailable() — синхронный вызов моста, а isFrozen() вызывается на каждой строке
+// списка установленных (два filter + сам IROW = трижды на приложение). Кэшируем;
+// сбрасываем при перечитывании списка — Hail мог появиться/исчезнуть.
+let hailAvail = null;
+const hailOk = () => {
+  if (hailAvail === null) {
+    const N = window.Native;
+    hailAvail = !!(N && N.hailAvailable && N.hailAvailable());
+  }
+  return hailAvail;
+};
 function hail(action, pkg) { const N = window.Native; return !!(N && N.hail && N.hail(action, pkg)); }
 // Приложение выключено/приостановлено — но это НЕ обязательно Hail: так же выглядят
 // отключённые системные приложения и «заморозка» прошивки (ColorOS и т.п.).
@@ -211,13 +237,16 @@ const ST = data({
 // ------------------------------------------------------------------ кеш карточек
 let metaCache = {};
 try { metaCache = JSON.parse(localStorage.getItem('rs_meta_v1') || '{}') || {}; } catch (e) { metaCache = {}; }
+// Без TTL кэш никогда не протухал: рейтинг и иконка оставались старыми навсегда.
+const META_TTL = 7 * 24 * 3600 * 1000;
 let metaSaveT = null;
 function saveMetaSoon() {
   clearTimeout(metaSaveT);
   metaSaveT = setTimeout(function () { try { localStorage.setItem('rs_meta_v1', JSON.stringify(metaCache)); } catch (e) {} }, 900);
 }
 async function metaFor(pkg) {
-  if (metaCache[pkg]) return metaCache[pkg];
+  const c = metaCache[pkg];
+  if (c && c.ts && Date.now() - c.ts < META_TTL) return c;
   let m = null;
   try {
     const b = await search(pkg, 0, 6);
@@ -235,7 +264,7 @@ async function metaFor(pkg) {
       m = { appId: i.appId, packageName: pkg, appName: i.appName, iconUrl: i.iconUrl, versionCode: i.versionCode };
     } catch (e) { /* нет в RuStore */ }
   }
-  if (m) { metaCache[pkg] = m; saveMetaSoon(); }
+  if (m) { m.ts = Date.now(); metaCache[pkg] = m; saveMetaSoon(); }
   return m;
 }
 
@@ -319,7 +348,7 @@ function setTab(id) {
   navPush({ tab: id, detail: null });
 }
 function ensureUpdData() {
-  if (ST.updTab === 'installed' && !ST.installed) loadInstalled();
+  if (ST.updTab === 'installed' && !ST.installed) refreshInstalled();
   if (ST.updTab !== 'installed' && !ST.updates && !ST.updChecking) checkUpdates();
 }
 function closeDetail() {
@@ -368,7 +397,7 @@ function loadHome(kind) {
   (async function () {
     const sec = await getNew('/v5/showcase/sections/' + kind + '?limit=8');
     let pop = null;
-    if (kind === 'APPS') { try { pop = await getNew('/v2/showcase/popular/apps?limit=12'); } catch (e) { pop = null; } }
+    if (kind === 'APPS') { try { pop = await getNew('/v2/showcase/popular/apps?limit=12', true); } catch (e) { pop = null; } }
     const rails = [];
     if (pop && pop.apps && pop.apps.length) {
       rails.push({ id: 'popular', title: 'Популярное сейчас', sub: '', pkgs: pop.apps.map(a => a.packageName).filter(Boolean).slice(0, 12) });
@@ -595,17 +624,19 @@ function listInstalled() {
     return (N.installedApps() || []).filter(a => a.packageName !== me && !a.packageName.endsWith('.webtoapk'));
   } catch (e) { return []; }
 }
-function refreshInstalled() { ST.installed = listInstalled(); }
-function loadInstalled() { refreshInstalled(); }
+function refreshInstalled() { hailAvail = null; ST.installed = listInstalled(); }
 // Иконки установленных приложений: ленивый кэш (base64 PNG из нативного моста).
+// Ключ включает версию: после обновления пакета иконка перезапрашивается (без ключа
+// она оставалась старой до перезапуска).
 const appIconCache = {};
-function appIcon(pkg) {
-  if (!(pkg in appIconCache)) {
+function appIcon(pkg, ver) {
+  const key = pkg + '|' + (ver || '');
+  if (!(key in appIconCache)) {
     let d = '';
     try { const N = window.Native; if (N && N.appIcon) d = N.appIcon(pkg) || ''; } catch (e) {}
-    appIconCache[pkg] = d;
+    appIconCache[key] = d;
   }
-  return appIconCache[pkg];
+  return appIconCache[key];
 }
 // Заморозить/разморозить через Hail (работает асинхронно — перечитываем список позже).
 function toggleFrozen(a) {
@@ -624,8 +655,15 @@ function nativeAppInfo(pkg) {
 }
 // Тап по «Установленному»: карточка в RuStore, а если приложения там нет — системные сведения.
 async function openInstalled(a) {
-  try { await info(a.packageName); openApp(a.packageName); }
-  catch (e) { if (netError(e)) toast('Нет сети'); else nativeAppInfo(a.packageName); }
+  try { await info(a.packageName); }
+  catch (e) {
+    // 404 — приложения нет в RuStore, показываем системные «Сведения». Всё остальное
+    // (500/429/сеть) — не повод врать, что приложения нет: говорим об ошибке.
+    if (is404(e)) nativeAppInfo(a.packageName);
+    else toast(netError(e) ? 'Нет сети' : 'Ошибка: ' + e.message);
+    return;
+  }
+  openApp(a.packageName);
 }
 async function checkUpdates(force) {
   const N = window.Native;
@@ -708,7 +746,7 @@ async function updateOne(it, prog) {
   if (installBusy()) return;   // уже что-то ставится — вторую установку не начинаем
   setBusy(pkg, '…');            // сразу занимаем: до первого тика прогресса кнопка не должна быть активной
   const say = function (s) { setBusy(pkg, s); if (prog) prog(s); };
-  const wasFrozen = isFrozen(it.a) && hailOk();
+  const wasFrozen = isFrozen(it.a);
   const label = it.a.label || pkg;
   let manual = false;   // откат на системный установщик — статус установки нам неизвестен
   try {
@@ -1054,7 +1092,7 @@ const INSTALLEDVIEW = memo(() => {
 
 const IROW = memo((a) => {
   const fr = isFrozen(a);
-  const ic = appIcon(a.packageName);
+  const ic = appIcon(a.packageName, a.versionName);
   DIV({ class: 'rcard', onClick: () => openInstalled(a) }) {
     if (ic) IMG({ class: 'ric', src: ic, alt: '' });
     else DIV({ class: 'ric ph' }, (a.label || a.packageName || '?').trim().charAt(0).toUpperCase());
@@ -1134,7 +1172,7 @@ const DETAILBODY = memo((i) => {
       BUTTON({ class: 'ghost', onClick: () => openExt('https://www.rustore.ru/catalog/app/' + i.packageName) }, 'На сайте');
       const st = installState(i);
       BUTTON({ class: 'primary', disabled: installBusy(),
-        onClick: () => st === 'open' ? (window.Native.launchApp && window.Native.launchApp(i.packageName)) : doDownload(i) },
+        onClick: () => st === 'open' ? launch(i.packageName, isFrozen(installedRec(i.packageName))) : doDownload(i) },
         ST.rowBusy[i.packageName] || (installBusy() ? 'Занято…'
           : (st === 'update' ? 'Обновить' : st === 'open' ? 'Открыть' : st === 'install' ? 'Установить' : 'Скачать APK')));
     }
