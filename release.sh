@@ -13,6 +13,8 @@
 # и качает APK по url оттуда же (тоже .../releases/latest/download/...).
 #
 # Версия берётся из confs/rustore/webapk.conf — поднимите её перед релизом.
+# Нужен авторизованный `gh` с правом на запись контента (fine-grained:
+# Contents: Read and write; classic: scope `repo`) — иначе релизы дают 403.
 set -euo pipefail
 cd "$(dirname "$0")"
 
