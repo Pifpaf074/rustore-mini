@@ -128,7 +128,7 @@ managePackages = true
 ```bash
 cd /work/4
 ./make.sh build confs/rustore/webapk.conf       # релиз: сайт вшит (site = site)
-./make.sh build confs/rustore-dev/webapk.conf   # dev: UI с example.com
+./make.sh build confs/rustore-dev/webapk.conf   # dev: UI с сервера раздачи
 ```
 
 Каноничные конфиги — в `../confs/`. Сайт для релиза синхронизируется из `../web/`:

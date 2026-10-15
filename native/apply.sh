@@ -39,6 +39,11 @@ echo "== 3/3 confs + UI =="
 for c in rustore rustore-dev; do
     mkdir -p "$ROOT/confs/$c"
     cp -a "$REPO/confs/$c/." "$ROOT/confs/$c/"
+    # Локальные значения (реальный домен раздачи и т.п.). Файл не в git;
+    # дописываем в конец — cp выше каждый раз возвращает конфиг к репозиторному.
+    if [ -f "$REPO/confs/$c/webapk.local.conf" ]; then
+        cat "$REPO/confs/$c/webapk.local.conf" >> "$ROOT/confs/$c/webapk.conf"
+    fi
 done
 mkdir -p "$ROOT/confs/rustore/site"
 cp -a "$REPO/web/." "$ROOT/confs/rustore/site/"

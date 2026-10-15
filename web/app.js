@@ -13,7 +13,10 @@ const HDR = { 'RuStoreVerCode': '1000', 'Accept': 'application/json' };
 const THEME_KEY = 'rs_theme_mode'; // 'auto' | 'light' | 'dark'
 // version.json APK лежит на нашем сервере: из bundled-сайта он кросс-доменный —
 // читаем через мост обёртки (GM_xmlhttpRequest), CORS там нет вообще.
-const VER_URL = 'https://example.com/rustore/version.json';
+// Адрес version.json для самообновления задаётся ЛОКАЛЬНО (web/config.local.js,
+// он не в git): в публичном репо домена сервера раздачи нет. Если не задан —
+// самообновление просто пропускается.
+const VER_URL = window.RS_VER_URL || '';
 
 const safeUrl = u => u ? String(u).replace('//static-m.rustore.ru/', '//static.rustore.ru/') : '';
 const mb    = n => n ? (n / 1048576).toFixed(1) + ' МБ' : '—';
@@ -782,7 +785,7 @@ async function installSelf() {
 }
 async function checkSelfUpdate() {
   const N = window.Native;
-  if (!N || !N.appInfo) return;
+  if (!N || !N.appInfo || !VER_URL) return;
   try {
     const r = await httpRaw(VER_URL, { headers: { 'Accept': 'application/json' } });
     if (!r.ok) return;

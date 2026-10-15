@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Деплой web-части «RuStore mini» — только для DEV-сборки
-# (confs/rustore-dev, mainURL=https://example.com/rustore/).
+# (confs/rustore-dev, mainURL из локального webapk.local.conf).
 #
 # Релизный APK НЕ использует этот сервер для UI: сайт вшит в APK (site = site).
 # Здесь же лежит только APK + version.json (для самообновления).
