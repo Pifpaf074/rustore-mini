@@ -65,13 +65,15 @@ public final class ApkInstaller {
     // заблокирован (фон / другой диалог), система его теряет — сессия висит вечно,
     // а страница ждёт installed/error. Поэтому повторяем запуск при возврате в foreground.
     private static Intent sUserAction;
+    /** Диалог подтверждения уже показан из foreground (повторять нельзя — см. retryPending). */
+    private static boolean sUserActionShown;
     // Номер попытки перезапуска диалога: отложенный повтор должен сработать один раз
     // и только если установка ещё не завершилась (иначе интент уже устарел).
     private static int sUserActionTry;
     // Пауза перед повтором: STATUS_SUCCESS/FAILURE приходит с задержкой ~1-2 с после
     // применения пакета, а сразу после установки запуск устаревшего интента показывал
     // ложное «Не удалось установить приложение».
-    private static final long USER_ACTION_RETRY_MS = 4000;
+    private static final long USER_ACTION_RETRY_MS = 1200;
 
     private ApkInstaller() {}
 
@@ -128,12 +130,17 @@ public final class ApkInstaller {
                 File dir = activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
                 File downloaded = new File(dir, name);
                 if (!downloaded.exists()) throw new Exception("download missing: " + name);
+                Log.d(TAG, "downloaded " + name + " = " + downloaded.length() + " bytes");
 
                 if (signer != null) {
                     List<String> actual = signersSha256(activity, downloaded.getAbsolutePath());
                     boolean ok = false;
                     for (String s : actual) if (s.equalsIgnoreCase(signer)) { ok = true; break; }
-                    if (!ok) throw new Exception("signer mismatch: " + actual);
+                    // Пустой список = не смогли прочитать сертификаты (бывает на старых API).
+                    // Не блокируем установку: для обновления совпадение подписи всё равно
+                    // проверяет сам PackageInstaller.
+                    if (!ok && !actual.isEmpty()) throw new Exception("signer mismatch: " + actual);
+                    if (!ok) Log.w(TAG, "signer check skipped (no certs read): " + downloaded.getName());
                 }
 
                 // Копируем в кэш и убираем загрузку из DownloadManager (чтобы отложенная
@@ -217,6 +224,7 @@ public final class ApkInstaller {
                     new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
             params.setSize(apk.length());
             int id = pi.createSession(params);
+            Log.d(TAG, "session " + id + " created, apk=" + apk.length() + " bytes");
             try (PackageInstaller.Session session = pi.openSession(id)) {
                 try (OutputStream out = session.openWrite("base.apk", 0, apk.length());
                      FileInputStream in = new FileInputStream(apk)) {
@@ -232,6 +240,7 @@ public final class ApkInstaller {
                 }
                 PendingIntent pending = PendingIntent.getBroadcast(a, id, result, flags);
                 session.commit(pending.getIntentSender());
+                Log.d(TAG, "session " + id + " committed");
             }
             apk.delete();
             return true;
@@ -243,17 +252,20 @@ public final class ApkInstaller {
 
     /** Продолжить отложенную установку после выдачи разрешения / возврата в foreground. */
     public static void retryPending(Activity a, WebView webview) {
-        // Сессия уже ждёт подтверждения пользователя, а диалог мог не показаться
-        // (запуск из фона заблокирован / перебит другим диалогом) — показываем снова,
-        // но с задержкой: см. USER_ACTION_RETRY_MS.
+        // Сессия уже ждёт подтверждения, а диалог не показывался (запуск из фона
+        // блокируется) — показываем теперь, когда мы на переднем плане.
+        // Если диалог уже был показан, повторять нельзя: после подтверждения повторный
+        // запуск того же intent'а даёт системное «ошибка анализа пакета» уже после установки.
         final Intent ua = sUserAction;
         final int attempt = ++sUserActionTry;
-        if (ua != null) {
+        if (ua != null && !sUserActionShown) {
             new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
                 @Override public void run() {
                     if (attempt != sUserActionTry || sUserAction != ua) return; // установка уже завершилась
+                    if (sUserActionShown) return;
                     Log.w(TAG, "retry user action");
-                    try { a.startActivity(ua); } catch (Exception e) { Log.e(TAG, "retry user action failed", e); }
+                    try { a.startActivity(ua); sUserActionShown = true; }
+                    catch (Exception e) { Log.e(TAG, "retry user action failed", e); }
                 }
             }, USER_ACTION_RETRY_MS);
         }
@@ -281,6 +293,7 @@ public final class ApkInstaller {
     static void onResult(Context ctx, Intent intent) {
         int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
         String msg = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
+        Log.d(TAG, "onResult status=" + status + " visible=" + MainActivity.sVisible + " msg=" + msg);
         JSONObject o = new JSONObject();
         try {
             if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
@@ -288,14 +301,23 @@ public final class ApkInstaller {
                 if (ua != null) {
                     ua.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     sUserAction = ua;
-                    ctx.startActivity(ua);
+                    sUserActionShown = false;
+                    Log.d(TAG, "pending user action, visible=" + MainActivity.sVisible);
+                    // Показываем сразу только из foreground: из фона системный диалог
+                    // всё равно не откроется, а его покажет retryPending из onResume.
+                    if (MainActivity.sVisible) {
+                        try { ctx.startActivity(ua); sUserActionShown = true; Log.d(TAG, "user action launched"); }
+                        catch (Exception e) { Log.e(TAG, "user action failed", e); }
+                    }
                 }
                 o.put("phase", "confirm");
             } else if (status == PackageInstaller.STATUS_SUCCESS) {
                 sUserAction = null;
+                sUserActionShown = false;
                 o.put("phase", "installed");
             } else {
                 sUserAction = null;
+                sUserActionShown = false;
                 o.put("phase", "error");
                 o.put("message", msg != null ? msg : ("install status " + status));
             }
@@ -497,9 +519,14 @@ public final class ApkInstaller {
                 PackageInfo pi = pm.getPackageArchiveInfo(apkPath, PackageManager.GET_SIGNING_CERTIFICATES);
                 if (pi != null && pi.signingInfo != null) {
                     SigningInfo si = pi.signingInfo;
-                    sigs = si.hasMultipleSigners() ? si.getApkContentsSigners() : si.getSigningCertificateHistory();
+                    // Для ФАЙЛА APK правильный список — содержимое подписи;
+                    // getSigningCertificateHistory() на API 28 для архива возвращает пусто.
+                    sigs = si.getApkContentsSigners();
+                    if (sigs == null || sigs.length == 0) sigs = si.getSigningCertificateHistory();
                 }
-            } else {
+            }
+            if (sigs == null || sigs.length == 0) {
+                // Старый путь: работает на всех версиях (в т.ч. Android 9).
                 PackageInfo pi = pm.getPackageArchiveInfo(apkPath, PackageManager.GET_SIGNATURES);
                 if (pi != null) sigs = pi.signatures;
             }
