@@ -240,6 +240,7 @@ const ST = data({
   updTab: 'upd', updates: null, updChecking: false, updProgress: '', updErr: '',
   updBusy: '', updAllBusy: false,
   installed: null,
+  icons: {},
   toast: '',
 });
 
@@ -636,20 +637,47 @@ function listInstalled() {
     return (N.installedApps() || []).filter(a => a.packageName !== me && !a.packageName.endsWith('.webtoapk'));
   } catch (e) { return []; }
 }
-function refreshInstalled() { hailAvail = null; ST.installed = listInstalled(); }
-// Иконки установленных приложений: ленивый кэш (base64 PNG из нативного моста).
-// Ключ включает версию: после обновления пакета иконка перезапрашивается (без ключа
-// она оставалась старой до перезапуска).
-const appIconCache = {};
-function appIcon(pkg, ver) {
-  const key = pkg + '|' + (ver || '');
-  if (!(key in appIconCache)) {
+// Иконки установленных приложений. Нативный мост синхронный, и на каждый вызов он
+// делает недешёвую работу (декод drawable, отрисовка в 96×96, PNG-компрессия, base64),
+// поэтому в рендере 200 строк подряд он давал заметный фриз. Строки рисуются сразу
+// с буквой-заглушкой, а иконки подтягиваются порциями в фоне (ST.icons — реактивно,
+// поэтому обновляется ровно та строка, чья иконка приехала).
+// Ключ включает версию: после обновления пакета иконка перезапрашивается.
+const iconKey = (pkg, ver) => pkg + '|' + (ver || '');
+const iconQueue = [];
+let iconTimer = null;
+function fillIcons() {
+  iconTimer = null;
+  for (let i = 0; i < 4 && iconQueue.length; i++) {
+    const it = iconQueue.shift();
     let d = '';
-    try { const N = window.Native; if (N && N.appIcon) d = N.appIcon(pkg) || ''; } catch (e) {}
-    appIconCache[key] = d;
+    try { const N = window.Native; if (N && N.appIcon) d = N.appIcon(it.pkg) || ''; } catch (e) {}
+    ST.icons[it.key] = d;
   }
-  return appIconCache[key];
+  if (iconQueue.length) iconTimer = setTimeout(fillIcons, 16);
 }
+function queueIcons() {
+  iconQueue.length = 0;
+  const arr = ST.installed || [];
+  for (let i = 0; i < arr.length; i++) {
+    const key = iconKey(arr[i].packageName, arr[i].versionName);
+    if (ST.icons[key] === undefined) iconQueue.push({ key: key, pkg: arr[i].packageName });
+  }
+  if (iconQueue.length && !iconTimer) iconTimer = setTimeout(fillIcons, 0);
+}
+function refreshInstalled() {
+  hailAvail = null;
+  ST.installed = listInstalled();
+  // Выкинуть иконки, которых больше нет в списке (удалённые приложения и старые
+  // версии), иначе кэш рос бы бесконечно.
+  const live = {};
+  const arr = ST.installed || [];
+  for (let i = 0; i < arr.length; i++) live[iconKey(arr[i].packageName, arr[i].versionName)] = 1;
+  for (const k in ST.icons) if (!live[k]) delete ST.icons[k];
+}
+// Отладочный хук (как window.__memoStats у движка): размеры кэшей — чтобы рост
+// можно было проверить тестом, а не на словах.
+window.__cacheStats = () => ({ icons: Object.keys(ST.icons).length, upd: Object.keys(updCache).length });
 // Заморозить/разморозить через Hail (работает асинхронно — перечитываем список позже).
 function toggleFrozen(a) {
   if (!hailOk()) { toast('Hail не установлен'); return; }
@@ -1084,6 +1112,9 @@ const UPDROW = memo((it) => {
 });
 
 const INSTALLEDVIEW = memo(() => {
+  // Иконки грузятся только когда список реально показан (и порциями — см. queueIcons).
+  // Оба под-таба отрисованы всегда (скрыты через hidden), поэтому проверяем именно активный.
+  if (ST.updTab === 'installed' && ST.installed && ST.installed.length) queueIcons();
   DIV({ class: 'sub' }) {
     if (!ST.installed) DIV({ class: 'hint' }, 'Загрузка…');
     else if (!ST.installed.length) DIV({ class: 'hint' }, 'Нет доступа к списку приложений. Разрешите доступ к установленным приложениям.');
@@ -1105,7 +1136,7 @@ const INSTALLEDVIEW = memo(() => {
 
 const IROW = memo((a) => {
   const fr = isFrozen(a);
-  const ic = appIcon(a.packageName, a.versionName);
+  const ic = ST.icons[iconKey(a.packageName, a.versionName)] || '';
   DIV({ class: 'rcard', onClick: () => openInstalled(a) }) {
     if (ic) IMG({ class: 'ric', src: ic, alt: '' });
     else DIV({ class: 'ric ph' }, (a.label || a.packageName || '?').trim().charAt(0).toUpperCase());
