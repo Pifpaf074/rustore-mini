@@ -364,7 +364,14 @@ function shotlist(i) {
 // ------------------------------------------------------------------ навигация
 function kindOf(tab) { return tab === 'games' ? 'GAMES' : 'APPS'; }
 function ensureHome(kind) { if (!ST.homes[kind] && !ST.homeLoading[kind]) loadHome(kind); }
-function clearSearch() { ST.query = ''; ST.results = null; ST.suggests = []; }
+function clearSearch() {
+  // Снять и летящий поиск: иначе поздний ответ проходил проверку `my === searchSeq` и
+  // записывал результаты уже после очистки строки — каталог пропадал, а в поле ввода пусто.
+  searchSeq++;
+  ST.searching = false;
+  ST.query = ''; ST.results = null;
+  clearSuggests();   // заодно гасит отложенный таймер подсказок (иначе они всплывут позже)
+}
 function searchActive() { return ST.results !== null || !!ST.query; }
 function setTab(id) {
   if (id === ST.tab) return;
