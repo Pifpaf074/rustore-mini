@@ -321,8 +321,11 @@ else if (mqDark.addListener) mqDark.addListener(syncSystemTheme);
 window.__refreshCurrent = function () {
   syncSystemTheme();
   if (ST.detail || ST.detailLoading || ST.detailErr) { if (ST.detailPkg) openDetail(ST.detailPkg); return; }
-  if (searchActive()) { if (ST.query) runSearch(ST.query); return; }
+  // Вкладка проверяется РАНЬШЕ поиска: setTab('upd') поиск не чистит (чистит только переход
+  // на apps/games), поэтому после поиска в каталоге и перехода в «Обновления» жест уходил
+  // в повторный поиск вместо проверки обновлений — и на экране не было никакой реакции.
   if (ST.tab === 'upd') { if (ST.updTab === 'installed') refreshInstalled(); else checkUpdates(true); return; }
+  if (searchActive()) { if (ST.query) runSearch(ST.query); return; }
   loadHome(kindOf(ST.tab));
 };
 // Pull-to-refresh должен замолчать, когда прокручен СВОЙ скроллер (оверлей карточки):
