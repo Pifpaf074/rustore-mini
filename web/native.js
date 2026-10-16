@@ -45,15 +45,34 @@
   // Колбэки активной установки. Фазы приходят из натива событием 'apk'.
   var pending = null;
 
+  // Сторож на случай, если натив замолчал (умер поток загрузки, встал DownloadManager):
+  // тогда промис не сядет никогда, а app.js будет считать, что установка идёт — и
+  // заблокирует все следующие (installBusy). Фазы permission/pending/confirm ждут
+  // пользователя, там тишина нормальна — на них сторож снимается.
+  // __installIdleMs — только для тестов.
+  var IDLE_MS = 60000;
+  var idleTimer = null;
+  function stopIdle() { if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; } }
+  function armIdle() {
+    stopIdle();
+    idleTimer = setTimeout(function () {
+      idleTimer = null;
+      var cb = pending; if (!cb) return;
+      pending = null;
+      cb.reject(new Error('система не отвечает — попробуйте установить ещё раз'));
+    }, window.__installIdleMs || IDLE_MS);
+  }
+
   window.__webtoapkEvent = function (name, data) {
     if (name !== 'apk' || !pending) return;
     var cb = pending, phase = data && data.phase;
-    if (phase === 'progress') { if (cb.onProgress) cb.onProgress(Number(data.got) || 0, Number(data.total) || 0); return; }
-    if (phase === 'permission' || phase === 'pending') { if (cb.onPending) cb.onPending(phase); return; }
-    if (phase === 'installed') { pending = null; cb.resolve({ installed: true }); return; }
-    if (phase === 'error') { pending = null; cb.reject(new Error(installError(data && data.message))); return; }
+    if (phase === 'progress') { armIdle(); if (cb.onProgress) cb.onProgress(Number(data.got) || 0, Number(data.total) || 0); return; }
+    if (phase === 'permission' || phase === 'pending') { stopIdle(); if (cb.onPending) cb.onPending(phase); return; }
+    if (phase === 'installed') { stopIdle(); pending = null; cb.resolve({ installed: true }); return; }
+    if (phase === 'error') { stopIdle(); pending = null; cb.reject(new Error(installError(data && data.message))); return; }
     // 'confirm' / 'done' — ждём installed либо error (done с session:false = провал сессии).
-    if (phase === 'done' && data.session === false) { pending = null; cb.resolve({ installed: false }); }
+    if (phase === 'done' && data.session === false) { stopIdle(); pending = null; cb.resolve({ installed: false }); return; }
+    if (phase === 'confirm' || phase === 'done') stopIdle();   // дальше решает система/пользователь
   };
 
   // --- pull-to-refresh ---
@@ -80,9 +99,10 @@
         // и её промис завис бы навсегда.
         if (pending) { reject(new Error('другая установка ещё идёт')); return; }
         pending = { resolve: resolve, reject: reject, onProgress: opts.onProgress, onPending: opts.onPending };
+        armIdle();
         try {
           BT.installApk(JSON.stringify({ url: opts.url, size: opts.size, signer: opts.signer, name: opts.name }));
-        } catch (e) { pending = null; reject(e); }
+        } catch (e) { stopIdle(); pending = null; reject(e); }
       });
     },
     // --- установленные пакеты ---

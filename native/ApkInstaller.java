@@ -67,6 +67,8 @@ public final class ApkInstaller {
     private static Intent sUserAction;
     /** Диалог подтверждения уже показан из foreground (повторять нельзя — см. retryPending). */
     private static boolean sUserActionShown;
+    /** Экран «неизвестные источники» уже открывали для этого APK (см. retryPending). */
+    private static boolean sPermScreenShown;
     // Номер попытки перезапуска диалога: отложенный повтор должен сработать один раз
     // и только если установка ещё не завершилась (иначе интент уже устарел).
     private static int sUserActionTry;
@@ -185,6 +187,24 @@ public final class ApkInstaller {
     }
 
     /**
+     * Открыть системный экран «установка неизвестных приложений» для нашего пакета.
+     * На части прошивок такого экрана нет / он подменён — тогда остаётся только
+     * подсказка на странице («Разрешите установку из этого источника»).
+     */
+    private static void openInstallSettings(Activity a) {
+        try {
+            Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:" + a.getPackageName()));
+            settings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            a.startActivity(settings);
+            sPermScreenShown = true;
+            Log.d(TAG, "install settings opened");
+        } catch (Exception e) {
+            Log.e(TAG, "cannot open install settings", e);
+        }
+    }
+
+    /**
      * Установка через PackageInstaller-сессию: копируем APK в сессию и получаем
      * колбэк статуса (успех/отмена/ошибка).
      * true - обработано (или ждём разрешения/возврата в foreground);
@@ -198,13 +218,9 @@ public final class ApkInstaller {
             sPendingApk = apk;
             sPendingActivity = new WeakReference<>(a);
             sPendingWebview = new WeakReference<>(webview);
+            sPermScreenShown = false;   // для этого APK экран настроек ещё не показывали
             emit(webview, phase("permission"));
-            if (MainActivity.sVisible) {
-                Intent settings = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                        Uri.parse("package:" + a.getPackageName()));
-                settings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                a.startActivity(settings);
-            }
+            if (MainActivity.sVisible) openInstallSettings(a);
             return true;
         }
         // Свёрнуто → Android блокирует запуск CONFIRM_INSTALL из фона
@@ -272,7 +288,19 @@ public final class ApkInstaller {
         final File apk = sPendingApk;
         if (apk == null || !apk.exists()) return;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                && !a.getPackageManager().canRequestPackageInstalls()) return;
+                && !a.getPackageManager().canRequestPackageInstalls()) {
+            // Разрешение так и не выдано. Экран настроек открывается только из commitSession
+            // и только когда приложение на переднем плане: если APK докачался в фоне
+            // (обычное дело на долгой загрузке), его не открыл никто — страница навсегда
+            // остаётся на «Разрешите установку», и человек не понимает, что от него хотят.
+            // Открываем сами, но ровно один раз для этого APK: иначе «назад» из настроек
+            // возвращает в приложение, onResume снова открывает настройки — и не выйти.
+            final WebView pw = webview != null ? webview
+                    : (sPendingWebview != null ? sPendingWebview.get() : null);
+            emit(pw, phase("permission"));
+            if (!sPermScreenShown && MainActivity.sVisible) openInstallSettings(a);
+            return;
+        }
         sPendingApk = null;
         final Activity act = (sPendingActivity != null && sPendingActivity.get() != null)
                 ? sPendingActivity.get() : a;
