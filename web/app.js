@@ -124,12 +124,21 @@ function devParams() {
     supportedAbis: (d.abis && d.abis.length) ? d.abis : ['arm64-v8a'],
   };
 }
+// Ссылка на APK. Основной путь — v3 на api.rustore.ru: он отдаёт результат БЕЗ обёртки
+// {code,body} (проверено живым запросом: в корне appId/versionCode/downloadUrls).
+// Но 200 без downloadUrls (например {code:'ERROR'}) — тоже возможен, и тогда надо идти
+// в старый API, а не падать «RuStore не отдал ссылку», не попробовав фолбэк. Заодно
+// принимаем и обёрнутый вид — если RuStore когда-нибудь перейдёт на него.
 async function downloadLink(appId, firstInstall) {
   const body = JSON.stringify(Object.assign({ appId: appId, firstInstall: !!firstInstall, withoutSplits: true }, devParams()));
   try {
     const r = await httpRaw(API_NEW + '/v3/showcase/apps/download-link',
       { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, HDR), body: body });
-    if (r.ok) return await r.json();
+    if (r.ok) {
+      const j = await r.json();
+      const d = (j && j.body && j.body.downloadUrls) ? j.body : j;
+      if (d && d.downloadUrls && d.downloadUrls.length) return d;
+    }
   } catch (e) { /* упал -> старый путь */ }
   return apiH('/applicationData/v2/download-link', { method: 'POST', body: body });
 }
