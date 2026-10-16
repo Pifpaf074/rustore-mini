@@ -20,9 +20,24 @@ const VER_URL = window.RS_VER_URL ||
   'https://github.com/Pifpaf074/rustore-mini/releases/latest/download/version.json';
 
 const safeUrl = u => u ? String(u).replace('//static-m.rustore.ru/', '//static.rustore.ru/') : '';
+// Буква-заглушка вместо иконки (TILE/RCARD/UPDROW/IROW): первая буква любого
+// непустого имени. Одна функция вместо пяти копий .trim().charAt(0).toUpperCase().
+const phLetter = (...xs) => {
+  for (let i = 0; i < xs.length; i++) { const s = String(xs[i] || '').trim(); if (s) return s.charAt(0).toUpperCase(); }
+  return '?';
+};
 const mb    = n => n ? (n / 1048576).toFixed(1) + ' МБ' : '—';
 const fnum  = n => Number(n || 0).toLocaleString('ru-RU');
 const fdate = s => s ? new Date(s).toLocaleDateString('ru-RU') : '—';
+
+// Один разбор ответа для обоих путей (мост и fetch): код выше не должен их различать.
+function mkRes(status, text) {
+  return {
+    ok: status >= 200 && status < 300,
+    status: status,
+    json: function () { try { return Promise.resolve(JSON.parse(text)); } catch (e) { return Promise.resolve({}); } },
+  };
+}
 
 // fetch с таймаутом: без него офлайн запросы висят бесконечно («читаем установленные…»).
 // Это только ФОЛБЭК: в приложении все запросы идут через мост (см. httpRaw).
@@ -35,9 +50,9 @@ async function fetchT(url, opts) {
   try {
     const r = await fetch(url, o);
     // Тело читаем ДО снятия таймера: иначе заголовки пришли (таймер снят), а чтение
-    // r.json() может висеть вечно. Возвращаем тот же минимальный вид, что gmRequest.
+    // r.json() может висеть вечно.
     const text = await r.text();
-    return { ok: r.ok, status: r.status, json: function () { try { return Promise.resolve(JSON.parse(text)); } catch (e) { return Promise.resolve({}); } } };
+    return mkRes(r.status, text);
   } finally { clearTimeout(t); }
 }
 const netError = (e) => /fetch|network|abort|timeout|load failed|failed to load/i.test(String((e && e.message) || e));
@@ -63,11 +78,7 @@ function gmRequest(url, opts) {
         if (done) return;
         clearTimeout(t);
         const text = res.responseText || '';
-        resolve({
-          ok: res.status >= 200 && res.status < 300,
-          status: res.status,
-          json: function () { try { return Promise.resolve(JSON.parse(text)); } catch (e) { return Promise.resolve({}); } },
-        });
+        resolve(mkRes(res.status, text));
       },
       onerror: function (e) { if (done) return; clearTimeout(t); reject(new Error('network: ' + ((e && e.error) || 'error'))); },
       ontimeout: function () { if (done) return; clearTimeout(t); reject(new Error('timeout')); },
@@ -97,7 +108,11 @@ async function api(path, opts) {
 }
 // Запросы, где обязателен RuStoreVerCode (overallInfo, download-link).
 async function apiH(path, opts) {
-  const o = Object.assign({ headers: Object.assign({}, HDR) }, opts || {});
+  const o = Object.assign({}, opts || {});
+  // Заголовки СЛИВАЕМ с HDR, а не заменяем: Object.assign({ headers: HDR }, opts) при
+  // opts.headers терял RuStoreVerCode целиком (запрос получал 400), да ещё и писал
+  // Content-Type в объект вызывающего.
+  o.headers = Object.assign({}, HDR, o.headers || {});
   if (o.body != null && !o.headers['Content-Type']) o.headers['Content-Type'] = 'application/json';
   return (await jfetch(API + path, o, true)).body;
 }
@@ -231,8 +246,16 @@ const TABS = [{ id: 'apps', label: 'Приложения' }, { id: 'games', labe
 // читают ST.meta[pkg] и перерисовываются точечно, поэтому словарь ссылок на
 // «прокси-карточки» (refs) в loadHome больше не нужен — и копия меты на каждую рельсу тоже.
 const META_TTL = 7 * 24 * 3600 * 1000;
+// Протухшие карточки выбрасываем, а не только игнорируем при чтении: кэш с TTL копился
+// вечно и однажды упёрся бы в квоту localStorage (setItem молча падает в catch, и кэш
+// просто перестал бы сохраняться). Возвращаем НОВЫЙ объект — вызывающий не мутируется.
+function pruneMeta(m) {
+  const out = {}, now = Date.now();
+  for (const k in m) { const c = m[k]; if (c && c.ts && now - c.ts <= META_TTL) out[k] = c; }
+  return out;
+}
 let metaInit = {};
-try { metaInit = JSON.parse(localStorage.getItem('rs_meta_v1') || '{}') || {}; } catch (e) { metaInit = {}; }
+try { metaInit = pruneMeta(JSON.parse(localStorage.getItem('rs_meta_v1') || '{}') || {}); } catch (e) { metaInit = {}; }
 const ST = data({
   tab: 'upd',
   themeMode: savedThemeMode(),
@@ -263,7 +286,9 @@ const ST = data({
 let metaSaveT = null;
 function saveMetaSoon() {
   clearTimeout(metaSaveT);
-  metaSaveT = setTimeout(function () { try { localStorage.setItem('rs_meta_v1', JSON.stringify(ST.meta)); } catch (e) {} }, 900);
+  metaSaveT = setTimeout(function () {
+    try { localStorage.setItem('rs_meta_v1', JSON.stringify(pruneMeta(ST.meta))); } catch (e) {}
+  }, 900);
 }
 async function metaFor(pkg) {
   const c = ST.meta[pkg];
@@ -385,7 +410,7 @@ function setTab(id) {
   navPush({ tab: id, detail: null });
 }
 function ensureUpdData() {
-  if (ST.updTab === 'installed' && !ST.installed) refreshInstalled();
+  if (ST.updTab === 'installed') { if (!ST.installed) refreshInstalled(); else queueIcons(); }
   if (ST.updTab !== 'installed' && !ST.updates && !ST.updChecking) checkUpdates();
 }
 function closeDetail() {
@@ -409,7 +434,7 @@ function applyNav(s) {
   ST.tab = tab;
   if (tab === 'upd') ensureUpdData();
   else ensureHome(kindOf(tab));
-  if (s && s.detail) openDetail(s.detail);
+  if (s && s.detail) openDetail(s.detail, s.pre);
   else hideDetail();
 }
 function navPush(s) { navStack.push(s); armSentinel(); applyNav(s); }
@@ -480,16 +505,12 @@ let searchSeq = 0;
 function clearSuggests() { sugSeq++; clearTimeout(qT); ST.suggests = []; }
 function onQuery(e) {
   const v = e.target.value;
-  const had = searchActive();
   ST.query = v;
-  if (!v.trim()) {
-    clearSearch();
-    // `history.back()` здесь практически недостижим: инпут поиска есть только на вкладках
-    // apps/games, а они всегда лежат в navStack (popstate, опустошая его, уводит на NAV0 =
-    // «Обновления», где инпута нет), т.е. `!navStack.length` при видимом инпуте всегда false.
-    // Оставлено страховкой; проверено tests/searchrace.mjs (0 вызовов back() на очистку).
-    if (had && !navStack.length && navArmed) history.back(); // снять сторожевой энти без «пустого» back
-  }
+  // Ветки с history.back() здесь нет намеренно: инпут поиска живёт только на вкладках
+  // apps/games, а они всегда лежат в navStack (popstate, опустошая его, уводит на NAV0 =
+  // «Обновления», где инпута нет), т.е. `!navStack.length` при видимом инпуте всегда false.
+  // Ветка была мёртвой (tests/searchrace.mjs: 0 вызовов back() на очистку).
+  if (!v.trim()) clearSearch();
   // Набранный запрос — уже «уровень»: без сторожевого энтри back уходил в натив,
   // webView.canGoBack() = false и приложение закрывалось (хотя есть что «отматывать»).
   armSentinel();
@@ -535,14 +556,20 @@ function pickSuggest(s) {
 // ------------------------------------------------------------------ карточка приложения
 // Номер текущего запроса карточки: ответы устаревших запросов игнорируются.
 let detailSeq = 0;
-async function openDetail(pkg) {
+async function openDetail(pkg, pre) {
   const my = ++detailSeq;
   ptrSync(false);   // карточка открывается сверху — жест снова доступен
   ST.detail = null; ST.detailPkg = pkg; ST.detailErr = ''; ST.detailLoading = true;
   ST.comments = null; ST.commentsLoading = false; ST.commentsErr = ''; ST.commentsPage = 0; ST.commentsTotal = 0;
   let d = null, err = '';
-  try { d = await info(pkg); }
-  catch (e) { err = 'Ошибка: ' + e.message; }
+  // pre — данные, уже полученные вызывающим (openInstalled спрашивает info, чтобы отличить
+  // 404 от сети): второй такой же запрос не нужен, а отдавать их через infoCached нельзя —
+  // тогда pull-to-refresh на карточке показывал бы кэш вместо свежих данных.
+  if (pre && pre.packageName === pkg) d = pre;
+  else {
+    try { d = await info(pkg); }
+    catch (e) { err = 'Ошибка: ' + e.message; }
+  }
   if (my !== detailSeq) return;   // карточку закрыли/переключили — ответ уже не наш
   ST.detail = d; ST.detailErr = err; ST.detailLoading = false;
 }
@@ -582,7 +609,7 @@ async function loadComments(pkg, page) {
   ST.commentsLoading = false;
 }
 // Открытие карточки из UI — через историю (аппаратный back её закроет).
-function openApp(pkg) { navPush({ tab: ST.tab, detail: pkg }); }
+function openApp(pkg, pre) { navPush({ tab: ST.tab, detail: pkg, pre: pre || null }); }
 // Что делать с приложением из карточки: установить / обновить / открыть.
 function installState(i) {
   const N = window.Native;
@@ -720,6 +747,10 @@ function fillIcons() {
 }
 function queueIcons() {
   iconQueue.length = 0;
+  // Иконки нужны только ВИДИМОМУ списку: под-таб «Установленные» могут вообще не открыть,
+  // а нативный appIcon на каждую строку — недешёвый синхронный вызов. Проверка живёт
+  // здесь, а не в рендере INSTALLEDVIEW: побочный эффект в рендере — лишняя связность.
+  if (ST.updTab !== 'installed') return;
   const arr = ST.installed || [];
   for (let i = 0; i < arr.length; i++) {
     const key = iconKey(arr[i].packageName, arr[i].versionCode);
@@ -727,15 +758,21 @@ function queueIcons() {
   }
   if (iconQueue.length && !iconTimer) iconTimer = setTimeout(fillIcons, 0);
 }
-function refreshInstalled() {
-  hailAvail = null;
-  ST.installed = listInstalled();
-  // Выкинуть иконки, которых больше нет в списке (удалённые приложения и старые
-  // версии), иначе кэш рос бы бесконечно.
+// Один путь обновления списка установленных: и проверка обновлений, и refreshInstalled
+// должны делать одно и то же — сбрасывать кэш Hail и выкидывать иконки исчезнувших
+// пакетов. Раньше checkUpdates писал ST.installed напрямую, и после него hailAvail
+// оставался устаревшим (снежинки рисовались по старому ответу моста), а ST.icons не чистился.
+function setInstalled(apps) {
+  hailAvail = null;   // Hail мог появиться/исчезнуть — кэш невалиден
+  ST.installed = apps;
   const live = {};
-  const arr = ST.installed || [];
+  const arr = apps || [];
   for (let i = 0; i < arr.length; i++) live[iconKey(arr[i].packageName, arr[i].versionCode)] = 1;
   for (const k in ST.icons) if (!live[k]) delete ST.icons[k];
+  queueIcons();
+}
+function refreshInstalled() {
+  setInstalled(listInstalled());
 }
 // Отладочный хук (как window.__memoStats у движка): размеры кэшей — чтобы рост
 // можно было проверить тестом, а не на словах.
@@ -757,7 +794,8 @@ function nativeAppInfo(pkg) {
 }
 // Тап по «Установленному»: карточка в RuStore, а если приложения там нет — системные сведения.
 async function openInstalled(a) {
-  try { await info(a.packageName); }
+  let v = null;
+  try { v = await info(a.packageName); }
   catch (e) {
     // 404 — приложения нет в RuStore, показываем системные «Сведения». Всё остальное
     // (500/429/сеть) — не повод врать, что приложения нет: говорим об ошибке.
@@ -765,7 +803,8 @@ async function openInstalled(a) {
     else toast(netError(e) ? 'Нет сети' : 'Ошибка: ' + e.message);
     return;
   }
-  openApp(a.packageName);
+  // Данные уже есть — отдаём их карточке, чтобы openDetail не запрашивал то же самое второй раз.
+  openApp(a.packageName, v);
 }
 async function checkUpdates(force) {
   const N = window.Native;
@@ -775,7 +814,7 @@ async function checkUpdates(force) {
   ST.updChecking = true; ST.updProgress = 'Читаем установленные…'; ST.updErr = '';
   try {
     const apps = listInstalled();
-    ST.installed = apps;
+    setInstalled(apps);   // тот же путь, что refreshInstalled: сброс hailAvail + чистка иконок
     if (!apps.length) {
       // Список пуст — скорее всего нет доступа к установленным приложениям.
       ST.updates = [];
@@ -908,7 +947,7 @@ async function installSelf() {
 }
 async function checkSelfUpdate() {
   const N = window.Native;
-  if (!N || !N.appInfo || !VER_URL) return;
+  if (!N || !N.appInfo) return;   // VER_URL всегда непустой (дефолт — GitHub Releases)
   try {
     const r = await httpRaw(VER_URL, { headers: { 'Accept': 'application/json' } });
     if (!r.ok) return;
@@ -971,16 +1010,22 @@ const SELFBANNER = memo(() => {
 });
 
 // ---- каталог: поиск + подборки ----
+// Рисует только АКТИВНАЯ вкладка каталога: вторая (скрытая) раньше строила и выдачу, и
+// рельсы (до ~100 плиток) впустую. Видимость решает ST.tab, а не hidden-обёртка.
+// ВАЖНО: комментарий вынесен НАД компонентом — комментарий прямо перед блочным вызовом
+// тега внутри DSL-блока ломает pre.js (см. AGENTS.md §5).
 const CATALOG = memo((kind) => {
   DIV({ class: 'pane' }) {
-    SEARCHBAR()
-    if (ST.query && ST.suggests && ST.suggests.length) SUGGLIST()
-    // Не searchActive(): при простом вводе (поиск ещё не запущен — он идёт по Enter или
-    // выбору подсказки) подборки должны остаться, иначе каталог исчезает на первой же
-    // букве. А во время запроса результаты сброшены в null — раньше по этому null
-    // рисовались подборки, и подсказка «Поиск…» не показывалась вообще.
-    if (ST.results !== null || ST.searching) RESULTS()
-    else RAILS(kind)
+    if (ST.tab === kind.toLowerCase()) {
+      SEARCHBAR()
+      if (ST.query && ST.suggests && ST.suggests.length) SUGGLIST()
+      // Не searchActive(): при простом вводе (поиск ещё не запущен — он идёт по Enter или
+      // выбору подсказки) подборки должны остаться, иначе каталог исчезает на первой же
+      // букве. А во время запроса результаты сброшены в null — раньше по этому null
+      // рисовались подборки, и подсказка «Поиск…» не показывалась вообще.
+      if (ST.results !== null || ST.searching) RESULTS()
+      else RAILS(kind)
+    }
   }
 });
 
@@ -1029,7 +1074,7 @@ const TILE = memo((pkg) => {
   const a = ST.meta[pkg] || { packageName: pkg };   // пусто — рисуем букву-заглушку
   DIV({ class: 'tile', onClick: () => openApp(pkg) }) {
     if (a.iconUrl) IMG({ class: 'tic', src: safeUrl(a.iconUrl), loading: 'lazy', referrerpolicy: 'no-referrer', alt: '' });
-    else DIV({ class: 'tic ph' }, (a.appName || a.packageName || '?').trim().charAt(0).toUpperCase());
+    else DIV({ class: 'tic ph' }, phLetter(a.appName, a.packageName));
     DIV({ class: 'tname' }, a.appName || a.packageName);
     if (a.averageUserRating) DIV({ class: 'trate' }, '★ ' + a.averageUserRating);
   }
@@ -1071,7 +1116,7 @@ const SUGROW = memo((s) => {
 const RCARD = memo((a) => {
   DIV({ class: 'rcard', onClick: () => openApp(a.packageName) }) {
     if (a.iconUrl) IMG({ class: 'ric', src: safeUrl(a.iconUrl), loading: 'lazy', referrerpolicy: 'no-referrer', alt: '' });
-    else DIV({ class: 'ric ph' }, (a.appName || a.packageName || '?').trim().charAt(0).toUpperCase());
+    else DIV({ class: 'ric ph' }, phLetter(a.appName, a.packageName));
     DIV({ class: 'rct' }) {
       DIV({ class: 'cname' }) { SPAN({ class: 'nm' }, a.appName || a.packageName); }
       DIV({ class: 'cpkg' }, a.packageName);
@@ -1142,7 +1187,7 @@ const UPDROW = memo((it) => {
   const fr = isFrozen(it.a);
   DIV({ class: 'rcard', onClick: () => openApp(it.a.packageName) }) {
     if (it.v.iconUrl) IMG({ class: 'ric', src: safeUrl(it.v.iconUrl), loading: 'lazy', referrerpolicy: 'no-referrer', alt: '' });
-    else DIV({ class: 'ric ph' }, (it.a.label || it.a.packageName || '?').trim().charAt(0).toUpperCase());
+    else DIV({ class: 'ric ph' }, phLetter(it.a.label, it.a.packageName));
     DIV({ class: 'rct' }) {
       DIV({ class: 'cname' }) {
         SPAN({ class: 'nm' }, it.a.label || it.a.packageName);
@@ -1165,9 +1210,6 @@ const UPDROW = memo((it) => {
 });
 
 const INSTALLEDVIEW = memo(() => {
-  // Иконки грузятся только когда список реально показан (и порциями — см. queueIcons).
-  // Оба под-таба отрисованы всегда (скрыты через hidden), поэтому проверяем именно активный.
-  if (ST.updTab === 'installed' && ST.installed && ST.installed.length) queueIcons();
   DIV({ class: 'sub' }) {
     if (!ST.installed) DIV({ class: 'hint' }, 'Загрузка…');
     else if (!ST.installed.length) DIV({ class: 'hint' }, 'Нет доступа к списку приложений. Разрешите доступ к установленным приложениям.');
@@ -1192,7 +1234,7 @@ const IROW = memo((a) => {
   const ic = ST.icons[iconKey(a.packageName, a.versionCode)] || '';
   DIV({ class: 'rcard', onClick: () => openInstalled(a) }) {
     if (ic) IMG({ class: 'ric', src: ic, alt: '' });
-    else DIV({ class: 'ric ph' }, (a.label || a.packageName || '?').trim().charAt(0).toUpperCase());
+    else DIV({ class: 'ric ph' }, phLetter(a.label, a.packageName));
     DIV({ class: 'rct' }) {
       DIV({ class: 'cname' }) {
         SPAN({ class: 'nm' }, a.label || a.packageName);
