@@ -60,6 +60,10 @@ const stub = `
 await send('Page.addScriptToEvaluateOnNewDocument', { source: stub });
 await send('Page.navigate', { url: BASE + '/index.html' });
 await new Promise(r => setTimeout(r, 6000));
+// Витрина грузится лениво (boot её больше не трогает) — открываем вкладку, как пользователь.
+const clickTab = (label) => ev(`(function(){ var t=Array.prototype.filter.call(document.querySelectorAll('.tab'),function(e){return e.textContent===${JSON.stringify(label)};}); if(!t.length) return 'НЕТ'; t[0].click(); return 'ok'; })()`);
+console.log('открываю «Приложения»:', await clickTab('Приложения'));
+await new Promise(r => setTimeout(r, 3000));
 
 const titles = async () => await ev(`JSON.stringify(Array.prototype.map.call(document.querySelectorAll('.railtitle'), function(e){ return e.textContent; }))`);
 const tiles = async () => await ev(`document.querySelectorAll('.railbody .tile').length`);

@@ -76,6 +76,10 @@ const tiles = () => ev(`JSON.stringify(Array.prototype.filter.call(document.quer
     return { name: (t.querySelector('.tname')||{}).textContent, rate: (t.querySelector('.trate')||{}).textContent || '', ph: !!t.querySelector('.tic.ph') }; }) }; }))`);
 const flat = async () => JSON.parse(await tiles()).flatMap(r => r.tiles);
 
+// Витрина на старте больше не грузится (boot её не трогает), поэтому праймим кэш меты
+// так, как это делает пользователь: сначала «Приложения», потом «Игры».
+console.log('открываю «Приложения»:', await clickTab('Приложения'));
+await new Promise(r => setTimeout(r, 3000));
 console.log('открываю «Игры»:', await clickTab('Игры'));
 await new Promise(r => setTimeout(r, 250));
 console.log('\nчерез 250 мс (мета игр ещё грузится, стаб отвечает через 2 с):');

@@ -30,11 +30,10 @@ const stub = `
     getAppIcon: function(){ return ''; },
     installApk: function(json){
       var o = JSON.parse(json);
-      // 20 одинаковых тиков прогресса (как при медленной закачке с шагом в 1%),
-      // потом 10 разных — на них перерисовка ОБЯЗАНА быть.
-      var i;
-      for (i = 0; i < 20; i++) setTimeout(function(){ window.__webtoapkEvent('apk', {phase:'progress', got:50, total:100}); }, 10 + i * 5);
-      for (i = 1; i <= 10; i++) setTimeout(function(){ window.__webtoapkEvent('apk', {phase:'progress', got:i*10, total:100}); }, 300 + i * 5);
+      // let (не var!) — иначе все колбэки увидят последнее значение счётчика и пришлют
+      // один и тот же текст (тест тогда проверял бы дедуп вместо реакции на смену).
+      for (let i = 0; i < 20; i++) setTimeout(function(){ window.__webtoapkEvent('apk', {phase:'progress', got:50, total:100}); }, 10 + i * 5);
+      for (let i = 1; i <= 10; i++) setTimeout(function(){ window.__webtoapkEvent('apk', {phase:'progress', got:i*10, total:100}); }, 300 + i * 5);
       setTimeout(function(){ apps[0].versionName='2.0'; apps[0].versionCode=2; window.__webtoapkEvent('apk', {phase:'installed'}); }, 600);
     },
     openAppInfo: function(){}, launchApp: function(){ return true; }, openExternal: function(){},
@@ -78,24 +77,32 @@ const urls2 = await ev(`window.__req`);
 console.log('  новых запросов sections:', urls2.filter(u => /showcase\/sections/.test(u)).length, '(ожидаем 1)');
 console.log('  плиток в рельсе:', await ev(`document.querySelectorAll('.view .rail .tile').length`), '| имя первой:', await ev(`(function(){ var n=document.querySelector('.view .rail .tile .tname'); return n? n.textContent : '?'; })()`));
 
-console.log('\n=== 5. Прогресс установки: одинаковые тики не должны перерисовывать ===');
+console.log('\n=== 5. Прогресс установки: одинаковые тики не должны трогать DOM ===');
 console.log('  back на «Обновления»:', await ev(`(function(){ var t=Array.prototype.filter.call(document.querySelectorAll('.tab'),function(e){return e.textContent==='Обновления';}); t[0].click(); return 'ok'; })()`));
 await new Promise(r => setTimeout(r, 800));
-const btn = () => ev(`(function(){ var rows=document.querySelectorAll('.sub .rcard');
+const btn = () => ev(`(function(){ var rows=document.querySelectorAll('.rcard');
   for (var i=0;i<rows.length;i++){ var p=rows[i].querySelector('.cpkg'); if(p && p.textContent.trim()==='pkga'){ var b=rows[i].querySelector('button'); return b? b.textContent : 'НЕТ КНОПКИ'; } } return 'НЕТ СТРОКИ'; })()`);
+const btnEl = `(function(){ var rows=document.querySelectorAll('.rcard');
+  for (var i=0;i<rows.length;i++){ var p=rows[i].querySelector('.cpkg'); if(p && p.textContent.trim()==='pkga'){ return rows[i].querySelector('button'); } } return null; })()`;
 console.log('  кнопка строки до установки:', JSON.stringify(await btn()));
-const before = await ev(`JSON.parse(JSON.stringify(window.__memoStats))`);
-await ev(`(function(){ var rows=document.querySelectorAll('.sub .rcard');
+// Считаем ФАКТИЧЕСКИЕ записи в DOM текста кнопки. Раньше проверяли по __memoStats,
+// но движок обновляет текст точечным скоупом элемента, не прогоном memo — счётчик
+// memo тут ничего не показывает (проверено: ran не растёт, а текст меняется).
+await ev(`window.__mut = 0; window.__obs = new MutationObserver(function(recs){ window.__mut += recs.length; });
+  window.__obs.observe(` + btnEl + `, { characterData: true, childList: true, subtree: true });`);
+await ev(`(function(){ var rows=document.querySelectorAll('.rcard');
   for (var i=0;i<rows.length;i++){ var p=rows[i].querySelector('.cpkg'); if(p && p.textContent.trim()==='pkga'){ rows[i].querySelector('button').click(); return 'ok'; } } return 'НЕТ'; })()`);
-await new Promise(r => setTimeout(r, 260));
-const mid = await ev(`JSON.parse(JSON.stringify(window.__memoStats))`);
-console.log('  20 одинаковых тиков «50%» → memo-прогонов:', mid.ran - before.ran,
-  (mid.ran - before.ran) <= 3 ? 'OK (движок пропускает запись того же значения)' : 'ПРОВАЛ (перерисовали ' + (mid.ran - before.ran) + ' раз)');
-await new Promise(r => setTimeout(r, 500));
-const after = await ev(`JSON.parse(JSON.stringify(window.__memoStats))`);
-console.log('  10 разных тиков «10..100%» → memo-прогонов:', after.ran - mid.ran,
-  (after.ran - mid.ran) >= 10 ? 'OK (на смену текста перерисовка есть)' : 'ПРОВАЛ (нет реакции на прогресс)');
+// окно 1: 20 одинаковых тиков (10..110 мс); окно 2: 10 разных (305..350 мс)
+await new Promise(r => setTimeout(r, 170));
+const m1 = await ev(`window.__mut`);
+console.log('  20 одинаковых тиков «50%» → записей в DOM:', m1, '| кнопка:', JSON.stringify(await btn()),
+  m1 <= 2 ? 'OK (только реальные смены «…»→«50%», повторы отсечены)' : 'ПРОВАЛ (перерисовка на каждый тик)');
+await ev(`window.__mut = 0`);
+await new Promise(r => setTimeout(r, 280));
+const m2 = await ev(`window.__mut`);
+console.log('  10 разных тиков «10..100%» → записей в DOM:', m2, '| кнопка:', JSON.stringify(await btn()),
+  m2 >= 8 ? 'OK (на смену текста реакция есть)' : 'ПРОВАЛ (нет реакции на прогресс)');
 await new Promise(r => setTimeout(r, 1500));
-console.log('  после установки кнопка/строка:', JSON.stringify(await btn()));
+console.log('  после установки кнопка/строка:', JSON.stringify(await btn()), '(ожидаем «НЕТ СТРОКИ» — строка ушла)');
 console.log('  кэши:', await ev(`JSON.stringify(window.__cacheStats())`));
 ws.close();
