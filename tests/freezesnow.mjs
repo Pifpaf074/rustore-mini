@@ -2,7 +2,8 @@
 // refreshInstalled() вызывался сразу после установки, когда приложение было ещё разморожено,
 // а обратная заморозка происходит в finally через 1.2 с — и список после неё никто не читал.
 // Hail при этом работает асинхронно, поэтому перечитываем с задержкой (как в toggleFrozen).
-// BASE=8099 — новый код; BASE=8098 — негативный контроль (app.js из git).
+// BASE=8099 — новый код; негативный контроль — app.js из ревизии ДО этого фикса
+// (0767ac5^ на порту 8097): сам фикс уже в HEAD, поэтому HEAD-копия его содержит.
 const BASE = process.env.BASE || 'http://127.0.0.1:8099';
 const j = await (await fetch('http://127.0.0.1:9223/json/new?about:blank', { method: 'PUT' })).json();
 const ws = new WebSocket(j.webSocketDebuggerUrl);
@@ -60,8 +61,9 @@ await new Promise(r => setTimeout(r, 7000));
 if ((await ev(`typeof window.__hail`)) !== 'object') { console.log('СТАБ НЕ УСТАНОВИЛСЯ — тест недействителен'); process.exit(1); }
 
 const snow = () => ev(`[].slice.call(document.querySelectorAll('.snow')).filter(function(x){ return x.offsetParent !== null; }).length`);
-const clickRowBtn = () => ev(`(function(){ var p=document.querySelector('.updbar').parentNode; var b=p.querySelector('button.primary');
-  if(!b) return 'НЕТ КНОПКИ'; b.click(); return 'ok'; })()`);
+const clickRowBtn = () => ev(`(function(){ var rows=document.querySelectorAll('.rcard');
+  for (var i=0;i<rows.length;i++){ var p=rows[i].querySelector('.cpkg'); if(p && p.textContent.trim()==='pkga'){ var b=rows[i].querySelector('button'); if(!b) return 'НЕТ КНОПКИ'; b.click(); return 'ok'; } }
+  return 'НЕТ СТРОКИ pkga'; })()`);
 const clickText = (t) => ev(`(function(){ var b=[].slice.call(document.querySelectorAll('button')).filter(function(x){ return x.textContent.trim()===${JSON.stringify(t)}; })[0];
   if(!b) return 'НЕТ КНОПКИ'; b.click(); return 'ok'; })()`);
 const sleep = ms => new Promise(r => setTimeout(r, ms));

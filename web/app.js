@@ -191,9 +191,15 @@ function infoCached(pkg) {
   const c = updCache[pkg];
   if (c && Date.now() - c.ts < UPD_TTL) return c.p;
   const p = infoRetry(pkg, 4).then(function (v) {
-    updCache[pkg] = { p: Promise.resolve(v), ts: Date.now() };
+    // Писать можно только если в кэше всё ещё НАШ промис: пока запрос был в полёте, запись
+    // могли сбросить (delete updCache после установки, очистка при force-проверке) — иначе
+    // поздний ответ воскрешал бы сброшенную запись и жил в кэше ещё UPD_TTL.
+    if (updCache[pkg] && updCache[pkg].p === p) updCache[pkg] = { p: Promise.resolve(v), ts: Date.now() };
     return v;
-  }, function (e) { delete updCache[pkg]; throw e; });
+  }, function (e) {
+    if (updCache[pkg] && updCache[pkg].p === p) delete updCache[pkg];
+    throw e;
+  });
   updCache[pkg] = { p: p, ts: Date.now() };
   return p;
 }
