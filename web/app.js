@@ -546,17 +546,24 @@ function hideDetail() {
 const CMT_PAGE = 10;
 async function loadComments(pkg, page) {
   if (ST.commentsLoading) return;
+  // Ответы устаревших запросов не должны трогать новую карточку. Проверки «тот же пакет»
+  // мало: detailPkg при закрытии не сбрасывается, поэтому переоткрытие ТОЙ ЖЕ карточки
+  // (pull-to-refresh, повторный тап) пропустило бы старый ответ — он затёр бы свежий
+  // список и погасил бы commentsLoading у запроса, который ещё в полёте. Счётчик карточки
+  // растёт и на открытии, и на закрытии, так что годится и как «тот же пакет», и как
+  // «тот же заход».
+  const my = detailSeq;
   ST.commentsLoading = true;
   if (page === 0) { ST.comments = []; ST.commentsErr = ''; }
   try {
     const b = await comments(pkg, page, CMT_PAGE);
-    if (ST.detailPkg !== pkg) return;   // карточку успели сменить/закрыть — не пишем в чужую
+    if (my !== detailSeq) return;   // карточку успели сменить/закрыть/переоткрыть
     const list = (b && b.content) || [];
     ST.comments = (page === 0 ? [] : (ST.comments || [])).concat(list);
     ST.commentsPage = page;
     ST.commentsTotal = (b && b.totalElements) || 0;
   } catch (e) {
-    if (ST.detailPkg !== pkg) return;
+    if (my !== detailSeq) return;
     ST.commentsErr = 'Ошибка: ' + e.message; toast('Отзывы: ' + e.message);
   }
   ST.commentsLoading = false;
