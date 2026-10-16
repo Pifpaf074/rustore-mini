@@ -465,6 +465,10 @@ function onQuery(e) {
   ST.query = v;
   if (!v.trim()) {
     clearSearch();
+    // `history.back()` здесь практически недостижим: инпут поиска есть только на вкладках
+    // apps/games, а они всегда лежат в navStack (popstate, опустошая его, уводит на NAV0 =
+    // «Обновления», где инпута нет), т.е. `!navStack.length` при видимом инпуте всегда false.
+    // Оставлено страховкой; проверено tests/searchrace.mjs (0 вызовов back() на очистку).
     if (had && !navStack.length && navArmed) history.back(); // снять сторожевой энти без «пустого» back
   }
   // Набранный запрос — уже «уровень»: без сторожевого энтри back уходил в натив,
