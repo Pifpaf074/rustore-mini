@@ -142,7 +142,8 @@ rsync -a --delete /work/rustore-mini/web/ /work/4/confs/rustore/site/
 Релиз обязан быть подписан ключом пользователя
 (`db90782f6ffe0f4cdd1af0c019f2d48e2275e63abf070a582415733973e026c2`), иначе
 обновление поверх установленной «RuStore mini» не встанет. Ключ лежит в
-`/work/4/my-release-key.jks` (копия из `/work/website-to-apk/app/my-release-key.jks`);
+`/work/4/my-release-key.jks` (копия старого ключа; форк `website-to-apk`, откуда он
+взят, удалён);
 исходный ключ апстрима сохранён как `/work/4/my-release-key.webtoapp.jks.bak`.
 
 ## Пожелания апстриму
