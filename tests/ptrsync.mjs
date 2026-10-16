@@ -70,4 +70,22 @@ console.log('4) закрываю карточку:', await closeCard());
 await new Promise(r => setTimeout(r, 400));
 const c = JSON.parse(await ptr());
 console.log('   ptr:', JSON.stringify(c), c[c.length - 1] === true ? 'OK' : 'ПРОВАЛ');
+
+// 5) Дедупликация: onScroll приходит на каждый пиксель, а мост синхронный (JS→Java).
+// Прокрутка в пределах одного состояния должна дёрнуть мост РОВНО один раз.
+console.log('\n5) дедупликация вызовов моста:');
+console.log('   открываю карточку:', await rowClick());
+await new Promise(r => setTimeout(r, 1500));
+await scrollTo(0);
+await new Promise(r => setTimeout(r, 200));
+const n0 = JSON.parse(await ptr()).length;
+for (let i = 0; i < 30; i++) await scrollTo(50 + i * 10);   // 30 событий, состояние одно: прокручено
+const n1 = JSON.parse(await ptr()).length;
+console.log('   30 scroll-событий «прокручено» → вызовов моста:', n1 - n0,
+  n1 - n0 === 1 ? 'OK (только смена состояния)' : 'ПРОВАЛ (вызов на каждое событие)');
+for (let i = 0; i < 10; i++) await scrollTo(0);              // состояние снова одно: вверху
+const n2 = JSON.parse(await ptr()).length;
+console.log('   10 scroll-событий «вверху» → вызовов моста:', n2 - n1,
+  n2 - n1 === 1 ? 'OK' : 'ПРОВАЛ');
+console.log('   итоговый ptr:', JSON.stringify(JSON.parse(await ptr()).slice(-3)));
 ws.close();

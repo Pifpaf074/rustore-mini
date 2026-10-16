@@ -330,7 +330,13 @@ window.__refreshCurrent = function () {
 };
 // Pull-to-refresh должен замолчать, когда прокручен СВОЙ скроллер (оверлей карточки):
 // натив видит только скролл WebView и иначе дёргает обновление при листании описания вверх.
+// Смена состояния — единственный повод дёргать мост: onScroll приходит десятки раз в
+// секунду при прокрутке описания, а вызов синхронный (JS→Java) и каждый раз что-то делает.
+let ptrOff = null;
 function ptrSync(scrolled) {
+  scrolled = !!scrolled;
+  if (scrolled === ptrOff) return;
+  ptrOff = scrolled;
   const N = window.Native;
   if (N && N.setPtrEnabled) N.setPtrEnabled(!scrolled);
 }
@@ -1203,13 +1209,25 @@ const DETAILBODY = memo((i) => {
     COMMENTS(i.packageName);
     DIV({ class: 'dacts' }) {
       BUTTON({ class: 'ghost', onClick: () => openExt('https://www.rustore.ru/catalog/app/' + i.packageName) }, 'На сайте');
-      const st = installState(i);
-      BUTTON({ class: 'primary', disabled: installBusy(),
-        onClick: () => st === 'open' ? launch(i.packageName, isFrozen(installedRec(i.packageName))) : doDownload(i) },
-        ST.rowBusy[i.packageName] || (installBusy() ? 'Занято…'
-          : (st === 'update' ? 'Обновить' : st === 'open' ? 'Открыть' : st === 'install' ? 'Установить' : 'Скачать APK')));
+      DLBTN(i)
     }
   }
+});
+
+// Кнопка установки в карточке — отдельный компонент. Раньше она была прямо в DETAILBODY,
+// и каждый тик прогресса (ST.rowBusy) перерисовывал всё тело карточки: заново считался
+// shotlist() и вызывался installState() — два синхронных вызова моста (isInstalled +
+// installedVersion), плюс обход всего тела. Теперь на тик перерисовывается только кнопка,
+// да и та в занятом состоянии мост не трогает (текст прогресса и так всё заменяет).
+const DLBTN = memo((i) => {
+  const busy = ST.rowBusy[i.packageName];
+  const st = busy ? null : installState(i);
+  BUTTON({
+    class: 'primary',
+    disabled: !!busy || installBusy(),
+    onClick: () => st === 'open' ? launch(i.packageName, isFrozen(installedRec(i.packageName))) : doDownload(i),
+  }, busy || (installBusy() ? 'Занято…'
+    : (st === 'update' ? 'Обновить' : st === 'open' ? 'Открыть' : st === 'install' ? 'Установить' : 'Скачать APK')));
 });
 
 const CHIP = memo((t) => {
