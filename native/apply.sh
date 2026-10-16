@@ -1,7 +1,7 @@
 #!/bin/sh
 # Накладывает оверлей «RuStore mini» на свежий checkout web-to-app.
 #
-#   rustore-mini/native/apply.sh /work/3
+#   rustore-mini/native/apply.sh /work/4
 #
 # Делает три вещи (идемпотентно, ничего не удаляет):
 #   1. git apply native/upstream-src.patch  — правки src/ + make.sh + default.conf
