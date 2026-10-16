@@ -653,7 +653,14 @@ async function runInstall(o) {
   finally {
     setBusy(pkg, null);
     // Морозим обратно только если реально дождались конца установки.
-    if (wasFrozen && !manual) { await sleep(1200); hail('FREEZE', pkg); }
+    if (wasFrozen && !manual) {
+      await sleep(1200);
+      hail('FREEZE', pkg);
+      // Список перечитываем ПОСЛЕ заморозки: refreshInstalled() выше сработал, когда
+      // приложение было ещё разморожено, и снежинка пропадала до ручного обновления.
+      // Hail делает своё дело асинхронно (как и в toggleFrozen), поэтому с задержкой.
+      setTimeout(refreshInstalled, 1600);
+    }
   }
 }
 async function doDownload(i) {
