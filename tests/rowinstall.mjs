@@ -89,6 +89,9 @@ await new Promise(r => setTimeout(r, 3000));
 console.log('  вызовы installApk:', await ev(`JSON.stringify(window.__installs)`), '(имя файла с версией)');
 console.log('  строк осталось:', await rows(), await pkgs());
 console.log('  тост:', JSON.stringify(await toastText()));
+// «Установленные» рисуются лениво (только когда под-таб открыт) — открываем его.
+await ev(`(function(){ var b=Array.prototype.filter.call(document.querySelectorAll('.segbtn'),function(e){return e.textContent==='Установленные';}); if(b.length) b[0].click(); return 'ok'; })()`);
+await new Promise(r => setTimeout(r, 300));
 console.log('  строка pkga в «Установленных»:', await installedRow('pkga'), '(должна быть 2.0 — значит refreshInstalled сработал)');
 
 console.log('\n--- 2. Обновление ЗАМОРОЖЕННОГО pkgc (Hail) ---');

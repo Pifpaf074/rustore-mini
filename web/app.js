@@ -908,7 +908,11 @@ const CATALOG = memo((kind) => {
   DIV({ class: 'pane' }) {
     SEARCHBAR()
     if (ST.query && ST.suggests && ST.suggests.length) SUGGLIST()
-    if (ST.results !== null) RESULTS()
+    // Не searchActive(): при простом вводе (поиск ещё не запущен — он идёт по Enter или
+    // выбору подсказки) подборки должны остаться, иначе каталог исчезает на первой же
+    // букве. А во время запроса результаты сброшены в null — раньше по этому null
+    // рисовались подборки, и подсказка «Поиск…» не показывалась вообще.
+    if (ST.results !== null || ST.searching) RESULTS()
     else RAILS(kind)
   }
 });
@@ -967,7 +971,9 @@ const TILE = memo((pkg) => {
 // ---- результаты поиска ----
 const RESULTS = memo(() => {
   DIV({ class: 'rlist' }) {
-    if (ST.searching) DIV({ class: 'hint' }, 'Поиск…');
+    // results === null: либо поиск в пути (searching), либо ещё тикает debounce ввода —
+    // в обоих случаях показываем «Поиск…», иначе было бы обращение к null.length.
+    if (ST.searching || ST.results === null) DIV({ class: 'hint' }, 'Поиск…');
     else if (!ST.results.length) DIV({ class: 'hint' }, 'Ничего не найдено');
     else for (let i = 0; i < ST.results.length; i++) {
       const a = ST.results[i];
@@ -1011,6 +1017,10 @@ const RCARD = memo((a) => {
 });
 
 // ---- обновления / установленные ----
+// Список «Установленные» рисуется лениво: у человека с двумя сотнями приложений это 200
+// строк в DOM (≈2400 узлов), которые к тому же перерисовываются на каждой проверке
+// обновлений — хотя под-таб могут вообще не открыть. Иконки тут давно ленивые
+// (queueIcons), так что скрытый список был чистой работой впустую.
 const UPDVIEW = memo(() => {
   DIV({ class: 'pane' }) {
     if (!canNative()) {
@@ -1021,7 +1031,7 @@ const UPDVIEW = memo(() => {
         SEGUPD('installed', 'Установленные');
       }
       DIV({ class: 'sub', hidden: ST.updTab !== 'upd' }) { UPDATESVIEW() }
-      DIV({ class: 'sub', hidden: ST.updTab !== 'installed' }) { INSTALLEDVIEW() }
+      DIV({ class: 'sub', hidden: ST.updTab !== 'installed' }) { if (ST.updTab === 'installed') { INSTALLEDVIEW() } }
     }
   }
 });
@@ -1255,10 +1265,17 @@ const TOASTBAR = memo(() => {
 
 // ------------------------------------------------------------------ старт
 applyTheme();
-// Каталог НЕ грузим на старте: стартовая вкладка — «Обновления», а витрина (подборки +
-// мета на каждую плитку) — это десятки запросов, которые конкурируют с проверкой
-// обновлений за сеть. Вкладка apps/games подтянет своё лениво: setTab → applyNav →
-// ensureHome (RAILS до тех пор покажет «Загружаем подборки…»).
-ensureUpdData();
-checkSelfUpdate();
+// Сначала рисуем (mount синхронный), а тяжёлые стартовые дела уводим за первый кадр:
+// ensureUpdData → checkUpdates синхронно дёргает listInstalled() (мост: JSON всего списка
+// пакетов + разбор), и это задерживало первый кадр. requestAnimationFrame + setTimeout
+// гарантируют, что кадр успеет отрисоваться до работы (одного setTimeout мало: таймер
+// может сработать раньше кадра).
 mount(document.getElementById('root'), APP);
+requestAnimationFrame(function () { setTimeout(function () {
+  // Каталог НЕ грузим на старте: стартовая вкладка — «Обновления», а витрина (подборки +
+  // мета на каждую плитку) — это десятки запросов, которые конкурируют с проверкой
+  // обновлений за сеть. Вкладка apps/games подтянет своё лениво: setTab → applyNav →
+  // ensureHome (RAILS до тех пор покажет «Загружаем подборки…»).
+  ensureUpdData();
+  checkSelfUpdate();
+}, 0); });
