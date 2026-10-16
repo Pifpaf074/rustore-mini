@@ -596,7 +596,8 @@ function installedRec(pkg) {
 // установка уже идёт), rec (запись установленного приложения для проверки заморозки).
 async function runInstall(o) {
   const pkg = o.pkg, label = o.label || pkg;
-  if (installBusy()) { if (!o.quiet) toast('Другая установка ещё идёт'); return; }
+  // o.bulk — шаг массового обновления: его собственный ключ '#all' занятостью не считается.
+  if (installBusy(o.bulk ? '#all' : null)) { if (!o.quiet) toast('Другая установка ещё идёт'); return; }
   setBusy(pkg, o.isUpdate ? '…' : 'Получаем ссылку…');
   const say = function (s) { setBusy(pkg, s); if (o.prog) o.prog(s); };
   // Обновление пакета системно снимает «заморозку» (enabled 2→0), поэтому замороженное
@@ -672,7 +673,10 @@ function listInstalled() {
 // поэтому в рендере 200 строк подряд он давал заметный фриз. Строки рисуются сразу
 // с буквой-заглушкой, а иконки подтягиваются порциями в фоне (ST.icons — реактивно,
 // поэтому обновляется ровно та строка, чья иконка приехала).
-// Ключ включает версию: после обновления пакета иконка перезапрашивается.
+// Ключ включает версию пакета: после обновления иконка перезапрашивается. Именно
+// versionCode, а не versionName — versionName многие сборки не меняют ("1.0" годами),
+// и тогда ключ оставался тем же: иконка не перезапрашивалась, а старая запись не
+// вычищалась как устаревшая. versionCode меняется на каждой сборке обязательно.
 const iconKey = (pkg, ver) => pkg + '|' + (ver || '');
 const iconQueue = [];
 let iconTimer = null;
@@ -690,7 +694,7 @@ function queueIcons() {
   iconQueue.length = 0;
   const arr = ST.installed || [];
   for (let i = 0; i < arr.length; i++) {
-    const key = iconKey(arr[i].packageName, arr[i].versionName);
+    const key = iconKey(arr[i].packageName, arr[i].versionCode);
     if (ST.icons[key] === undefined) iconQueue.push({ key: key, pkg: arr[i].packageName });
   }
   if (iconQueue.length && !iconTimer) iconTimer = setTimeout(fillIcons, 0);
@@ -702,7 +706,7 @@ function refreshInstalled() {
   // версии), иначе кэш рос бы бесконечно.
   const live = {};
   const arr = ST.installed || [];
-  for (let i = 0; i < arr.length; i++) live[iconKey(arr[i].packageName, arr[i].versionName)] = 1;
+  for (let i = 0; i < arr.length; i++) live[iconKey(arr[i].packageName, arr[i].versionCode)] = 1;
   for (const k in ST.icons) if (!live[k]) delete ST.icons[k];
 }
 // Отладочный хук (как window.__memoStats у движка): размеры кэшей — чтобы рост
@@ -807,16 +811,22 @@ async function checkUpdates(force) {
 const updAllReady = () => !!(ST.updates && ST.updates.some(x => x.compatible));
 // Занятость установок — в состоянии (движок проксирует вложенные объекты,
 // так что ST.rowBusy[pkg] = '42%' перерисовывает только нужные места).
-function installBusy() { return Object.keys(ST.rowBusy).length > 0; }
+// installBusy(excl) — занятость без учёта ключа excl (нужно массовому обновлению: у него
+// свой ключ '#all' на всё время цикла, иначе оно бы блокировало само себя).
+function installBusy(excl) {
+  const keys = Object.keys(ST.rowBusy);
+  for (let i = 0; i < keys.length; i++) if (keys[i] !== excl) return true;
+  return false;
+}
 function setBusy(pkg, text) { if (text == null) delete ST.rowBusy[pkg]; else ST.rowBusy[pkg] = text; }
 // prog — необязательный приёмник текста прогресса (строка массового обновления).
 // Всё тело — в runInstall (общее с установкой из карточки).
-function updateOne(it, prog) {
+function updateOne(it, prog, bulk) {
   if (!it || !it.compatible) return;
   return runInstall({
     pkg: it.a.packageName, label: it.a.label || it.a.packageName,
     appId: it.v.appId, versionCode: it.v.versionCode, signature: it.v.signature,
-    isUpdate: true, rec: it.a, prog: prog, quiet: true,
+    isUpdate: true, rec: it.a, prog: prog, quiet: true, bulk: !!bulk,
     err: it.v.aggregatorInfo ? 'внешний источник — нет прямого APK' : 'RuStore не отдал ссылку',
   });
 }
@@ -825,18 +835,28 @@ async function updateAll() {
   const list = (ST.updates || []).filter(x => x.compatible && !ST.rowBusy[x.a.packageName]);
   if (!list.length) return;
   ST.updAllBusy = true;
-  for (let i = 0; i < list.length; i++) {
-    const label = list[i].a.label || list[i].a.packageName;
-    const head = 'Обновляем ' + label + '  ·  ' + (i + 1) + '/' + list.length;
-    ST.updBusy = head;
-    let st;
-    try { st = await updateOne(list[i], function (s) { ST.updBusy = head + '  ·  ' + s; }); } catch (e) {}
-    // Откат на системный установщик: подтверждение ждёт пользователь — не открываем
-    // следующий установщик поверх и не считаем это успехом.
-    if (st === 'manual') { ST.updBusy = ''; ST.updAllBusy = false; toast('Дальше — вручную: подтвердите установку'); return; }
+  // Ключ '#all' держит «слот установки» на всё время цикла. Без него слот на мгновение
+  // освобождался: runInstall в finally сначала снимает busy с пакета, и только потом ждёт
+  // 1.2 с до повторной заморозки. Запущенная в это окно установка из карточки/строки молча
+  // съедала следующий пункт списка (installBusy в updateOne → тихий skip), а в конце всё
+  // равно показывалось «Готово».
+  setBusy('#all', 'Массовое обновление');
+  try {
+    for (let i = 0; i < list.length; i++) {
+      const label = list[i].a.label || list[i].a.packageName;
+      const head = 'Обновляем ' + label + '  ·  ' + (i + 1) + '/' + list.length;
+      ST.updBusy = head;
+      let st;
+      try { st = await updateOne(list[i], function (s) { ST.updBusy = head + '  ·  ' + s; }, true); } catch (e) {}
+      // Откат на системный установщик: подтверждение ждёт пользователь — не открываем
+      // следующий установщик поверх и не считаем это успехом.
+      if (st === 'manual') { toast('Дальше — вручную: подтвердите установку'); return; }
+    }
+    toast('Готово');
+  } finally {
+    setBusy('#all', null);
+    ST.updBusy = ''; ST.updAllBusy = false;
   }
-  ST.updBusy = ''; ST.updAllBusy = false;
-  toast('Готово');
 }
 
 // ------------------------------------------------------------------ самообновление
@@ -1138,7 +1158,7 @@ const INSTALLEDVIEW = memo(() => {
 
 const IROW = memo((a) => {
   const fr = isFrozen(a);
-  const ic = ST.icons[iconKey(a.packageName, a.versionName)] || '';
+  const ic = ST.icons[iconKey(a.packageName, a.versionCode)] || '';
   DIV({ class: 'rcard', onClick: () => openInstalled(a) }) {
     if (ic) IMG({ class: 'ric', src: ic, alt: '' });
     else DIV({ class: 'ric ph' }, (a.label || a.packageName || '?').trim().charAt(0).toUpperCase());
