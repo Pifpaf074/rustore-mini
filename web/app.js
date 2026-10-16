@@ -600,11 +600,16 @@ function installedRec(pkg) {
 // именно потому, что в одной из копий не было пост-проверки. Поэтому тело одно, а всё
 // разное передаётся параметрами: isUpdate (firstInstall в запросе ссылки + тексты),
 // prog (приёмник прогресса для строки массового обновления), quiet (не ругаться, если
-// установка уже идёт), rec (запись установленного приложения для проверки заморозки).
+// установка уже идёт), rec (запись установленного приложения для проверки заморозки),
+// bulk (шаг массового обновления).
+// Возвращает статус: 'ok' (установлено) | 'fail' (ошибка/не применилась) | 'busy'
+// (занято другой установкой) | 'manual' (отдали системному установщику) | 'web'
+// (в браузере отдали файл на скачивание). Массовому обновлению нужен счёт: раньше
+// ошибки глотались и в конце всё равно писалось «Готово».
 async function runInstall(o) {
   const pkg = o.pkg, label = o.label || pkg;
   // o.bulk — шаг массового обновления: его собственный ключ '#all' занятостью не считается.
-  if (installBusy(o.bulk ? '#all' : null)) { if (!o.quiet) toast('Другая установка ещё идёт'); return; }
+  if (installBusy(o.bulk ? '#all' : null)) { if (!o.quiet) toast('Другая установка ещё идёт'); return 'busy'; }
   setBusy(pkg, o.isUpdate ? '…' : 'Получаем ссылку…');
   const say = function (s) { setBusy(pkg, s); if (o.prog) o.prog(s); };
   // Обновление пакета системно снимает «заморозку» (enabled 2→0), поэтому замороженное
@@ -619,7 +624,7 @@ async function runInstall(o) {
       a.href = apk.url; a.rel = 'noopener'; a.download = '';
       document.body.appendChild(a); a.click(); a.remove();
       toast('Загрузка началась');
-      return;
+      return 'web';
     }
     const res = await installApk(apk, pkg + '-' + o.versionCode + '.apk', {
       onProgress: function (got, total) { say(total ? Math.round(got / total * 100) + '%' : (o.isUpdate ? '…' : mb(got))); },
@@ -648,8 +653,11 @@ async function runInstall(o) {
       refreshInstalled();             // «Установленные» держат свой список
       toast(now < 0 ? (label + ' — установлено (проверить не удалось)')
                     : (o.isUpdate ? label + ' обновлён' : label + ' установлен'));
-    } else toast('Установка не применилась: ' + label);
-  } catch (e) { toast('Ошибка: ' + e.message); }
+      return 'ok';
+    }
+    toast('Установка не применилась: ' + label);
+    return 'fail';
+  } catch (e) { toast('Ошибка: ' + e.message); return 'fail'; }
   finally {
     setBusy(pkg, null);
     // Морозим обратно только если реально дождались конца установки.
@@ -855,6 +863,7 @@ async function updateAll() {
   // съедала следующий пункт списка (installBusy в updateOne → тихий skip), а в конце всё
   // равно показывалось «Готово».
   setBusy('#all', 'Массовое обновление');
+  let done = 0;   // сколько пунктов реально установилось (иначе «Готово» врёт)
   try {
     for (let i = 0; i < list.length; i++) {
       const label = list[i].a.label || list[i].a.packageName;
@@ -862,11 +871,13 @@ async function updateAll() {
       ST.updBusy = head;
       let st;
       try { st = await updateOne(list[i], function (s) { ST.updBusy = head + '  ·  ' + s; }, true); } catch (e) {}
+      if (st === 'ok') done++;
       // Откат на системный установщик: подтверждение ждёт пользователь — не открываем
       // следующий установщик поверх и не считаем это успехом.
-      if (st === 'manual') { toast('Дальше — вручную: подтвердите установку'); return; }
+      if (st === 'manual') { toast('Обновлено ' + done + ' из ' + list.length + ' — дальше вручную'); return; }
     }
-    toast('Готово');
+    if (!done) toast('Не удалось обновить ни одного из ' + list.length);
+    else toast('Обновлено ' + done + ' из ' + list.length);
   } finally {
     setBusy('#all', null);
     ST.updBusy = ''; ST.updAllBusy = false;
