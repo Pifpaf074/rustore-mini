@@ -221,6 +221,12 @@ const sleep = (ms) => new Promise(function (r) { setTimeout(r, ms); });
 const TABS = [{ id: 'apps', label: 'Приложения' }, { id: 'games', label: 'Игры' }, { id: 'upd', label: 'Обновления' }];
 
 // ------------------------------------------------------------------ состояние
+// Кэш карточек (localStorage, TTL 7 дней) держим прямо в состоянии: плитки рельсов
+// читают ST.meta[pkg] и перерисовываются точечно, поэтому словарь ссылок на
+// «прокси-карточки» (refs) в loadHome больше не нужен — и копия меты на каждую рельсу тоже.
+const META_TTL = 7 * 24 * 3600 * 1000;
+let metaInit = {};
+try { metaInit = JSON.parse(localStorage.getItem('rs_meta_v1') || '{}') || {}; } catch (e) { metaInit = {}; }
 const ST = data({
   tab: 'upd',
   themeMode: savedThemeMode(),
@@ -241,21 +247,20 @@ const ST = data({
   updBusy: '', updAllBusy: false,
   installed: null,
   icons: {},
+  meta: metaInit,
   toast: '',
 });
 
 // ------------------------------------------------------------------ кеш карточек
-let metaCache = {};
-try { metaCache = JSON.parse(localStorage.getItem('rs_meta_v1') || '{}') || {}; } catch (e) { metaCache = {}; }
-// Без TTL кэш никогда не протухал: рейтинг и иконка оставались старыми навсегда.
-const META_TTL = 7 * 24 * 3600 * 1000;
+// Хранится в ST.meta (см. состояние). Без TTL кэш никогда не протухал: рейтинг и
+// иконка оставались старыми навсегда.
 let metaSaveT = null;
 function saveMetaSoon() {
   clearTimeout(metaSaveT);
-  metaSaveT = setTimeout(function () { try { localStorage.setItem('rs_meta_v1', JSON.stringify(metaCache)); } catch (e) {} }, 900);
+  metaSaveT = setTimeout(function () { try { localStorage.setItem('rs_meta_v1', JSON.stringify(ST.meta)); } catch (e) {} }, 900);
 }
 async function metaFor(pkg) {
-  const c = metaCache[pkg];
+  const c = ST.meta[pkg];
   if (c && c.ts && Date.now() - c.ts < META_TTL) return c;
   let m = null;
   try {
@@ -274,7 +279,7 @@ async function metaFor(pkg) {
       m = { appId: i.appId, packageName: pkg, appName: i.appName, iconUrl: i.iconUrl, versionCode: i.versionCode };
     } catch (e) { /* нет в RuStore */ }
   }
-  if (m) { m.ts = Date.now(); metaCache[pkg] = m; saveMetaSoon(); }
+  if (m) { m.ts = Date.now(); ST.meta[pkg] = m; saveMetaSoon(); }
   return m;
 }
 
@@ -426,25 +431,17 @@ function loadHome(kind) {
         pkgs: pkgs.slice(0, 12),
       });
     }
-    // Сначала рамки с заглушками — карточки донаполнятся лениво.
-    ST.homes[kind] = rails.map(r => Object.assign({}, r, { apps: r.pkgs.map(p => ({ packageName: p, appName: '', iconUrl: '' })) }));
+    // Сначала только рамки и пакеты — метаданные подтянутся лениво в ST.meta, и каждая
+    // плитка перерисуется сама (точечная реактивность движка по ключу пакета).
+    ST.homes[kind] = rails;
     ST.homeLoading[kind] = false;
-    // Ссылки на прокси-карточки, чтобы точечно дописывать поля.
-    const refs = {};
-    for (let x = 0; x < ST.homes[kind].length; x++) {
-      const r = ST.homes[kind][x];
-      for (let y = 0; y < r.apps.length; y++) {
-        const a = r.apps[y];
-        (refs[a.packageName] = refs[a.packageName] || []).push(a);
+    const uniq = [];
+    for (let x = 0; x < rails.length; x++) {
+      for (let y = 0; y < rails[x].pkgs.length; y++) {
+        if (uniq.indexOf(rails[x].pkgs[y]) < 0) uniq.push(rails[x].pkgs[y]);
       }
     }
-    const uniq = Object.keys(refs);
-    pool(uniq, 6, async function (p) {
-      const m = await metaFor(p);
-      if (!m) return;
-      const arr = refs[p] || [];
-      for (let z = 0; z < arr.length; z++) Object.assign(arr[z], m);
-    });
+    pool(uniq, 6, function (p) { return metaFor(p); });
   })().catch(function (e) {
     ST.homeLoading[kind] = false; ST.homeErr[kind] = 'Не удалось загрузить: ' + e.message;
   });
@@ -694,7 +691,7 @@ function refreshInstalled() {
 }
 // Отладочный хук (как window.__memoStats у движка): размеры кэшей — чтобы рост
 // можно было проверить тестом, а не на словах.
-window.__cacheStats = () => ({ icons: Object.keys(ST.icons).length, upd: Object.keys(updCache).length });
+window.__cacheStats = () => ({ icons: Object.keys(ST.icons).length, upd: Object.keys(updCache).length, meta: Object.keys(ST.meta).length });
 // Заморозить/разморозить через Hail (работает асинхронно — перечитываем список позже).
 function toggleFrozen(a) {
   if (!hailOk()) { toast('Hail не установлен'); return; }
@@ -949,17 +946,17 @@ const RAIL = memo((r) => {
       if (r.sub) DIV({ class: 'railsub' }, r.sub);
     }
     DIV({ class: 'railbody' }) {
-      for (let i = 0; i < r.apps.length; i++) {
-        const a = r.apps[i];
-        window.ID = a.packageName;
-        TILE(a);
+      for (let i = 0; i < r.pkgs.length; i++) {
+        window.ID = r.pkgs[i];
+        TILE(r.pkgs[i]);
       }
     }
   }
 });
 
-const TILE = memo((a) => {
-  DIV({ class: 'tile', onClick: () => openApp(a.packageName) }) {
+const TILE = memo((pkg) => {
+  const a = ST.meta[pkg] || { packageName: pkg };   // пусто — рисуем букву-заглушку
+  DIV({ class: 'tile', onClick: () => openApp(pkg) }) {
     if (a.iconUrl) IMG({ class: 'tic', src: safeUrl(a.iconUrl), loading: 'lazy', referrerpolicy: 'no-referrer', alt: '' });
     else DIV({ class: 'tic ph' }, (a.appName || a.packageName || '?').trim().charAt(0).toUpperCase());
     DIV({ class: 'tname' }, a.appName || a.packageName);
