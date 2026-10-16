@@ -605,6 +605,9 @@ async function doDownload(i) {
           delete updCache[pkg];
           if (updDone) updDone.add(pkg);
           ST.updates = (ST.updates || []).filter(x => x.a.packageName !== pkg);
+          // Перечитать список установленных: без этого во вкладке «Установленные»
+          // только что поставленное приложение не появится (там живёт свой ST.installed).
+          refreshInstalled();
           toast(now < 0 ? (label + ' — установлено (проверить не удалось)')
                         : (wasUpdate ? label + ' обновлён' : label + ' установлен'));
         } else toast('Установка не применилась: ' + label);
@@ -783,6 +786,7 @@ async function updateOne(it, prog) {
       delete updCache[pkg]; // сбросить кэш info, иначе приложение всплывёт снова
       if (updDone) updDone.add(pkg);   // не даём текущей проверке вернуть эту строку
       ST.updates = (ST.updates || []).filter(x => x.a.packageName !== pkg);
+      refreshInstalled();   // см. doDownload: «Установленные» держат свой список
       toast(now < 0 ? (label + ' — установлено (проверить не удалось)') : (label + ' обновлён'));
     } else {
       toast('Установка не применилась: ' + label);
