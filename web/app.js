@@ -574,61 +574,74 @@ function installedRec(pkg) {
   for (let k = 0; k < arr.length; k++) if (arr[k].packageName === pkg) return arr[k];
   return null;
 }
-async function doDownload(i) {
-  const pkg = i.packageName;
-  const label = i.appName || i.label || pkg;
-  const wasUpdate = installState(i) === 'update';
-  if (installBusy()) { toast('Другая установка ещё идёт'); return; }
+// Единый путь установки для всех случаев: карточка (doDownload), строка списка и
+// «Обновить все» (updateOne). Раньше это были две почти одинаковые функции, и они уже
+// успели разъехаться — установка из карточки не убирала строку из списка обновлений
+// именно потому, что в одной из копий не было пост-проверки. Поэтому тело одно, а всё
+// разное передаётся параметрами: isUpdate (firstInstall в запросе ссылки + тексты),
+// prog (приёмник прогресса для строки массового обновления), quiet (не ругаться, если
+// установка уже идёт), rec (запись установленного приложения для проверки заморозки).
+async function runInstall(o) {
+  const pkg = o.pkg, label = o.label || pkg;
+  if (installBusy()) { if (!o.quiet) toast('Другая установка ещё идёт'); return; }
+  setBusy(pkg, o.isUpdate ? '…' : 'Получаем ссылку…');
+  const say = function (s) { setBusy(pkg, s); if (o.prog) o.prog(s); };
   // Обновление пакета системно снимает «заморозку» (enabled 2→0), поэтому замороженное
-  // приложение надо разморозить до установки и заморозить обратно после (как в строке списка).
-  const wasFrozen = hailOk() && isFrozen(installedRec(pkg));
+  // приложение надо разморозить до установки и заморозить обратно после.
+  const wasFrozen = isFrozen(o.rec || installedRec(pkg));
   let manual = false;   // откат на системный установщик — статус установки нам неизвестен
-  setBusy(pkg, 'Получаем ссылку…');
   try {
     if (wasFrozen) { hail('UNFREEZE', pkg); await sleep(900); }
-    const apk = await resolveApk(i.appId, true, 'RuStore не отдал ссылку (внешний источник?)', i.signature);
-    if (canNative()) {
-      const res = await installApk(apk, pkg + '-' + i.versionCode + '.apk', {
-        onProgress: function (got, total) { setBusy(pkg, total ? Math.round(got / total * 100) + '%' : mb(got)); },
-        onPending: function (phase) {
-          if (phase === 'permission') { setBusy(pkg, 'Разрешите установку'); toast('Разрешите установку из этого источника'); }
-          else { setBusy(pkg, 'Разверните приложение'); toast('Скачано — вернитесь в приложение для установки'); }
-        },
-      });
-      // installed:true — PackageInstaller-сессия вернула SUCCESS (промис ждёт реального конца
-      // установки, не «открытия установщика»). installed:false — откат на ACTION_VIEW: статус
-      // нам не придёт, поэтому ничего не утверждаем.
-      if (res && res.installed === false) {
-        manual = true;
-        toast('Открыт системный установщик — подтвердите установку');
-      } else {
-        await sleep(700);
-        const now = window.Native.installedVersion ? Number(window.Native.installedVersion(pkg)) : -1;
-        if (now < 0 || now >= Number(i.versionCode)) {
-          // Та же уборка, что и в строке списка: сбросить кэш info, не дать текущей проверке
-          // вернуть строку обратно и убрать её из списка обновлений.
-          delete updCache[pkg];
-          if (updDone) updDone.add(pkg);
-          ST.updates = (ST.updates || []).filter(x => x.a.packageName !== pkg);
-          // Перечитать список установленных: без этого во вкладке «Установленные»
-          // только что поставленное приложение не появится (там живёт свой ST.installed).
-          refreshInstalled();
-          toast(now < 0 ? (label + ' — установлено (проверить не удалось)')
-                        : (wasUpdate ? label + ' обновлён' : label + ' установлен'));
-        } else toast('Установка не применилась: ' + label);
-      }
-    } else {
+    const apk = await resolveApk(o.appId, !o.isUpdate, o.err, o.signature);
+    if (!canNative()) {   // в браузере ставить нечем — просто отдаём файл на скачивание
       const a = document.createElement('a');
       a.href = apk.url; a.rel = 'noopener'; a.download = '';
       document.body.appendChild(a); a.click(); a.remove();
       toast('Загрузка началась');
+      return;
     }
+    const res = await installApk(apk, pkg + '-' + o.versionCode + '.apk', {
+      onProgress: function (got, total) { say(total ? Math.round(got / total * 100) + '%' : (o.isUpdate ? '…' : mb(got))); },
+      onPending: function (phase) {
+        if (phase === 'permission') { say('Разрешите установку'); toast('Разрешите установку из этого источника'); }
+        else { say(o.isUpdate ? 'Разверните' : 'Разверните приложение'); toast('Скачано — вернитесь в приложение для установки'); }
+      },
+    });
+    // installed:true — PackageInstaller-сессия вернула SUCCESS (промис ждёт реального конца
+    // установки, не «открытия установщика»). installed:false — откат на ACTION_VIEW: статус
+    // нам не придёт, поэтому ничего не утверждаем и НЕ морозим обратно (иначе заморозим
+    // приложение, пока его ещё ставят).
+    if (res && res.installed === false) {
+      manual = true;
+      toast(o.isUpdate ? label + ': подтвердите установку в системном установщике'
+                       : 'Открыт системный установщик — подтвердите установку');
+      return 'manual';
+    }
+    await sleep(700);
+    const now = window.Native.installedVersion ? Number(window.Native.installedVersion(pkg)) : -1;
+    if (now < 0 || now >= Number(o.versionCode)) {
+      // now < 0 — версию не прочитать (нет доступа к списку приложений); считаем, что установка прошла.
+      delete updCache[pkg];           // сбросить кэш info, иначе приложение всплывёт снова
+      if (updDone) updDone.add(pkg);  // не даём текущей проверке вернуть эту строку
+      ST.updates = (ST.updates || []).filter(x => x.a.packageName !== pkg);
+      refreshInstalled();             // «Установленные» держат свой список
+      toast(now < 0 ? (label + ' — установлено (проверить не удалось)')
+                    : (o.isUpdate ? label + ' обновлён' : label + ' установлен'));
+    } else toast('Установка не применилась: ' + label);
   } catch (e) { toast('Ошибка: ' + e.message); }
   finally {
     setBusy(pkg, null);
     // Морозим обратно только если реально дождались конца установки.
     if (wasFrozen && !manual) { await sleep(1200); hail('FREEZE', pkg); }
   }
+}
+async function doDownload(i) {
+  return runInstall({
+    pkg: i.packageName, label: i.appName || i.label || i.packageName,
+    appId: i.appId, versionCode: i.versionCode, signature: i.signature,
+    isUpdate: installState(i) === 'update',
+    err: 'RuStore не отдал ссылку (внешний источник?)',
+  });
 }
 
 // ------------------------------------------------------------------ обновления
@@ -784,53 +797,15 @@ const updAllReady = () => !!(ST.updates && ST.updates.some(x => x.compatible));
 function installBusy() { return Object.keys(ST.rowBusy).length > 0; }
 function setBusy(pkg, text) { if (text == null) delete ST.rowBusy[pkg]; else ST.rowBusy[pkg] = text; }
 // prog — необязательный приёмник текста прогресса (строка массового обновления).
-async function updateOne(it, prog) {
+// Всё тело — в runInstall (общее с установкой из карточки).
+function updateOne(it, prog) {
   if (!it || !it.compatible) return;
-  const pkg = it.a.packageName;
-  if (installBusy()) return;   // уже что-то ставится — вторую установку не начинаем
-  setBusy(pkg, '…');            // сразу занимаем: до первого тика прогресса кнопка не должна быть активной
-  const say = function (s) { setBusy(pkg, s); if (prog) prog(s); };
-  const wasFrozen = isFrozen(it.a);
-  const label = it.a.label || pkg;
-  let manual = false;   // откат на системный установщик — статус установки нам неизвестен
-  try {
-    if (wasFrozen) { hail('UNFREEZE', pkg); await sleep(900); }
-    const apk = await resolveApk(it.v.appId, false, it.v.aggregatorInfo ? 'внешний источник — нет прямого APK' : 'RuStore не отдал ссылку', it.v.signature);
-    const res = await installApk(apk, pkg + '.apk', {
-      onProgress: function (got, total) { say(total ? Math.round(got / total * 100) + '%' : '…'); },
-      onPending: function (phase) {
-        if (phase === 'permission') { say('Разрешите установку'); toast('Разрешите установку из этого источника'); }
-        else { say('Разверните'); toast('Скачано — вернитесь в приложение для установки'); }
-      },
-    });
-    if (res && res.installed === false) {
-      // PackageInstaller-сессия не открылась -> ACTION_VIEW: система сама спросит подтверждение,
-      // а нам статус не придёт. Поэтому версию не проверяем, строку не убираем и НЕ морозим
-      // обратно — иначе заморозим приложение, пока его ещё ставят.
-      manual = true;
-      toast(label + ': подтвердите установку в системном установщике');
-      return 'manual';
-    }
-    await sleep(700);
-    const now = window.Native.installedVersion ? Number(window.Native.installedVersion(it.a.packageName)) : -1;
-    if (now < 0 || now >= Number(it.v.versionCode)) {
-      // now < 0 — версию не прочитать (нет доступа к списку приложений); считаем, что установка прошла.
-      delete updCache[pkg]; // сбросить кэш info, иначе приложение всплывёт снова
-      if (updDone) updDone.add(pkg);   // не даём текущей проверке вернуть эту строку
-      ST.updates = (ST.updates || []).filter(x => x.a.packageName !== pkg);
-      refreshInstalled();   // см. doDownload: «Установленные» держат свой список
-      toast(now < 0 ? (label + ' — установлено (проверить не удалось)') : (label + ' обновлён'));
-    } else {
-      toast('Установка не применилась: ' + label);
-    }
-  } catch (e) {
-    toast('Ошибка: ' + e.message);
-  } finally {
-    setBusy(pkg, null);
-    // Вернуть заморозку (даже при ошибке) — если она была и если мы реально дождались
-    // конца установки (иначе заморозим приложение прямо во время установки).
-    if (wasFrozen && !manual) { await sleep(1200); hail('FREEZE', pkg); }
-  }
+  return runInstall({
+    pkg: it.a.packageName, label: it.a.label || it.a.packageName,
+    appId: it.v.appId, versionCode: it.v.versionCode, signature: it.v.signature,
+    isUpdate: true, rec: it.a, prog: prog, quiet: true,
+    err: it.v.aggregatorInfo ? 'внешний источник — нет прямого APK' : 'RuStore не отдал ссылку',
+  });
 }
 async function updateAll() {
   if (ST.updAllBusy || installBusy()) return;
