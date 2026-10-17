@@ -17,6 +17,7 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.storage.StorageManager;
 import android.provider.Settings;
 import android.util.Log;
 import android.webkit.WebView;
@@ -26,14 +27,14 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.ref.WeakReference;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * RuStore-расширение (наш форк, не апстрим).
@@ -77,12 +78,24 @@ public final class ApkInstaller {
     // ложное «Не удалось установить приложение».
     private static final long USER_ACTION_RETRY_MS = 1200;
 
+    // Итог commitSession.
+    private static final int COMMIT_OK = 0;       // сессия создана, файл APK больше не нужен
+    private static final int COMMIT_PENDING = 1;  // ждём разрешение/foreground — файл нужен
+    private static final int COMMIT_FALLBACK = 2; // сессия не удалась — ставим через ACTION_VIEW
+
+    // Сколько держать скачанный APK, который никто не установил (мусор после убийства
+    // процесса между загрузкой и установкой). Файл на 300 МБ на забитом диске — это много.
+    private static final long KEEP_DOWNLOAD_MS = 24 * 60 * 60 * 1000L;
+    private static volatile boolean sCleanedUp;
+
     private ApkInstaller() {}
 
     // ---------------------------------------------------------------- install
 
     /** Скачать APK (DownloadManager) и установить.
-     *  opts (JSON): {url, size?, signer?, name?}. Прогресс/фазы — событием 'apk'. */
+     *  opts (JSON): {url, size?, signer?, name?}. Прогресс/фазы — событием 'apk'.
+     *  Имя файла берём детерминированное (pkg-versionCode.apk), поэтому уже скачанный
+     *  APK переиспользуем, а начатую ранее загрузку — подхватываем вместо новой. */
     public static void install(final Activity activity, final WebView webview, final String optsJson) {
         new Thread(() -> {
             File apk = null;
@@ -92,86 +105,276 @@ public final class ApkInstaller {
                 JSONObject o = new JSONObject(optsJson == null || optsJson.isEmpty() ? "{}" : optsJson);
                 String url = o.getString("url");
                 String signer = opt(o, "signer");
-                String name = o.optString("name", "app.apk");
-                if (!name.endsWith(".apk")) name += ".apk";
-                // Уникальное имя, чтобы не пересекаться с прошлыми загрузками
-                name = "rs" + System.currentTimeMillis() + "-" + name;
+                String name = safeName(o.optString("name", "app.apk"));
+                long size = o.optLong("size", -1);
+
+                cleanupOnce(activity);
 
                 dm = (DownloadManager) activity.getSystemService(Context.DOWNLOAD_SERVICE);
                 if (dm == null) throw new Exception("no DownloadManager");
+                File dir = activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+                if (dir == null) throw new Exception("no downloads dir");
+                apk = new File(dir, name);
 
-                DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
-                req.setMimeType("application/vnd.android.package-archive");
-                req.setTitle(name);
-                req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE);
-                req.setDestinationInExternalFilesDir(activity, Environment.DIRECTORY_DOWNLOADS, name);
-                dlId = dm.enqueue(req);
+                // Что DownloadManager уже знает про этот файл (свои загрузки он отдаёт по имени).
+                long[] row = ourDownloads(dm).get(name);
+                long rowId = row == null ? -1 : row[0];
+                int rowStatus = row == null ? -1 : (int) row[1];
+                // Целый APK с прошлой попытки? Тогда качать заново незачем. Размер знаем из
+                // download-link; если его нет — верим статусу DownloadManager.
+                boolean have = apk.exists() && apk.length() > 0
+                        && (size > 0 ? apk.length() == size : rowStatus == DownloadManager.STATUS_SUCCESSFUL);
 
-                long total = o.optLong("size", -1);
-                while (true) {
-                    Thread.sleep(400);
-                    DownloadManager.Query q = new DownloadManager.Query().setFilterById(dlId);
-                    int status = -1;
-                    long got = 0, tot = 0;
-                    try (Cursor c = dm.query(q)) {
-                        if (c != null && c.moveToFirst()) {
-                            status = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
-                            got = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR));
-                            tot = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES));
-                        }
-                    }
-                    if (tot > 0) total = tot;
+                if (have && (rowId < 0 || rowStatus == DownloadManager.STATUS_SUCCESSFUL)) {
+                    Log.d(TAG, "reuse " + name + " = " + apk.length() + " bytes");
+                    checkSpace(activity, apk, size, false);
                     JSONObject p = phase("progress");
-                    p.put("got", got);
-                    p.put("total", total);
+                    p.put("got", apk.length());
+                    p.put("total", apk.length());
                     emit(webview, p);
-                    if (status == DownloadManager.STATUS_SUCCESSFUL) break;
-                    if (status == DownloadManager.STATUS_FAILED) throw new Exception("download failed");
+                } else if (rowId >= 0 && (rowStatus == DownloadManager.STATUS_RUNNING
+                        || rowStatus == DownloadManager.STATUS_PENDING
+                        || rowStatus == DownloadManager.STATUS_PAUSED)) {
+                    // Загрузка уже идёт (её переживает даже убийство процесса) — подключаемся.
+                    Log.d(TAG, "adopt download " + rowId + " for " + name);
+                    dlId = rowId;
+                } else {
+                    if (rowId >= 0) { try { dm.remove(rowId); } catch (Exception ignored) {} }
+                    apk.delete();
+                    checkSpace(activity, apk, size, true);
+                    DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
+                    req.setMimeType("application/vnd.android.package-archive");
+                    req.setTitle(name);
+                    req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE);
+                    req.setDestinationInExternalFilesDir(activity, Environment.DIRECTORY_DOWNLOADS, name);
+                    dlId = dm.enqueue(req);
                 }
 
-                File dir = activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
-                File downloaded = new File(dir, name);
-                if (!downloaded.exists()) throw new Exception("download missing: " + name);
-                Log.d(TAG, "downloaded " + name + " = " + downloaded.length() + " bytes");
+                if (dlId >= 0) {
+                    long total = size;
+                    while (true) {
+                        Thread.sleep(400);
+                        DownloadManager.Query q = new DownloadManager.Query().setFilterById(dlId);
+                        int status = -1, reason = -1;
+                        long got = 0, tot = 0;
+                        try (Cursor c = dm.query(q)) {
+                            if (c != null && c.moveToFirst()) {
+                                status = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
+                                reason = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON));
+                                got = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR));
+                                tot = c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES));
+                            }
+                        }
+                        if (tot > 0) total = tot;
+                        JSONObject p = phase("progress");
+                        p.put("got", got);
+                        p.put("total", total);
+                        emit(webview, p);
+                        if (status == DownloadManager.STATUS_SUCCESSFUL) break;
+                        if (status == DownloadManager.STATUS_FAILED) throw new Exception(downloadError(reason));
+                    }
+                }
+
+                if (!apk.exists()) throw new Exception("download missing: " + name);
+                Log.d(TAG, "downloaded " + name + " = " + apk.length() + " bytes");
 
                 if (signer != null) {
-                    List<String> actual = signersSha256(activity, downloaded.getAbsolutePath());
+                    List<String> actual = signersSha256(activity, apk.getAbsolutePath());
                     boolean ok = false;
                     for (String s : actual) if (s.equalsIgnoreCase(signer)) { ok = true; break; }
                     // Пустой список = не смогли прочитать сертификаты (бывает на старых API).
                     // Не блокируем установку: для обновления совпадение подписи всё равно
                     // проверяет сам PackageInstaller.
                     if (!ok && !actual.isEmpty()) throw new Exception("signer mismatch: " + actual);
-                    if (!ok) Log.w(TAG, "signer check skipped (no certs read): " + downloaded.getName());
+                    if (!ok) Log.w(TAG, "signer check skipped (no certs read): " + apk.getName());
                 }
 
-                // Копируем в кэш и убираем загрузку из DownloadManager (чтобы отложенная
-                // установка не зависела от его файла и пропала нотификация).
-                apk = new File(activity.getCacheDir(), "install-" + System.currentTimeMillis() + ".apk");
-                try (InputStream in = new FileInputStream(downloaded);
-                     OutputStream out = new FileOutputStream(apk)) {
-                    byte[] buf = new byte[BUF];
-                    int n;
-                    while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-                }
-                try { dm.remove(dlId); } catch (Exception ignored) {}
-                downloaded.delete();
-
+                // Ставим прямо из файла DownloadManager. Копия в кэш была лишним размером APK,
+                // и на телефоне с полным диском не хватало именно её (плюс сама сессия
+                // установщика пишет ещё одну копию — в пике и так два размера).
                 sWebview = new WeakReference<>(webview);
-                boolean session = commitSession(activity, webview, apk);
+                int res = commitSession(activity, webview, apk);
                 JSONObject d = phase("done");
-                d.put("session", session);
+                d.put("session", res != COMMIT_FALLBACK);
                 emit(webview, d);
-                if (!session) launchInstaller(activity, apk);
+                if (res == COMMIT_FALLBACK) launchInstaller(activity, apk);
             } catch (Exception e) {
                 Log.e(TAG, "install failed", e);
-                if (apk != null && !apk.equals(sPendingApk)) apk.delete();
-                if (dm != null && dlId >= 0) { try { dm.remove(dlId); } catch (Exception ignored) {} }
+                // Недокачанный или битый APK не оставляем: место на телефоне дорогое.
+                // А вот уже готовый файл при нехватке места бережём — на следующей попытке
+                // он переиспользуется без повторной загрузки.
+                if (!(e instanceof NoSpaceException)) {
+                    if (dm != null && dlId >= 0) { try { dm.remove(dlId); } catch (Exception ignored) {} }
+                    else if (apk != null && !apk.equals(sPendingApk)) { try { apk.delete(); } catch (Exception ignored) {} }
+                }
                 JSONObject err = phase("error");
                 try { err.put("message", String.valueOf(e.getMessage())); } catch (Exception ignored) {}
                 emit(webview, err);
             }
         }, "apk-installer").start();
+    }
+
+    // ------------------------------------------------------ загрузки: место и мусор
+
+    /** Имя файла из JS: только безопасные символы, чтобы не выйти из каталога загрузок. */
+    private static String safeName(String raw) {
+        String name = raw == null ? "" : raw.replaceAll("[^A-Za-z0-9._-]", "_");
+        while (name.startsWith(".")) name = name.substring(1);
+        if (name.isEmpty()) name = "app";
+        if (!name.endsWith(".apk")) name += ".apk";
+        return name;
+    }
+
+    /**
+     * Хватит ли места. Считаем по «доступному» (см. checkSpace), а не по свободному месту:
+     * Android держит резерв, из-за которого «свободно 799 МБ» превращается в «доступно 318 МБ»
+     * (ровно это и убивало установку 2ГИС на 323 МБ). А установка пишет в сессию
+     * PackageInstaller ещё одну копию APK, поэтому в пике нужно два размера.
+     */
+    private static void checkSpace(Context ctx, File apk, long size, boolean willDownload) throws Exception {
+        if (size <= 0) return;
+        // Считаем по «доступному» (getAllocatableBytes), а не по свободному месту: Android держит
+        // резерв, из-за которого «свободно 960 МБ» — это «доступно 456 МБ». По этому же числу
+        // отказывается качать DownloadManager и падает запись в сессию PackageInstaller
+        // («Requested internal only, but not enough space») — проверено на Realme с 2ГИС.
+        // Копий в пике две (сам APK + его запись в сессию), поэтому при загрузке нужно два размера.
+        long need = willDownload ? size * 2 : size;
+        long have = allocatableBytes(ctx);
+        if (have <= 0) {
+            File dir = apk.getParentFile();
+            have = dir != null ? dir.getUsableSpace() : 0;
+        }
+        if (have > 0 && have < need) throw new NoSpaceException(spaceMessage(need, have, willDownload));
+    }
+
+    /** Не хватает места. Отдельный тип нужен обработчику: уже скачанный APK в этом случае
+     *  удалять нельзя — после освобождения места он ещё пригодится (в этом и смысл кэша). */
+    private static final class NoSpaceException extends Exception {
+        NoSpaceException(String message) { super(message); }
+    }
+
+    /** Сколько система реально даст занять (учитывает резерв Android). -1 — не смогли узнать. */
+    private static long allocatableBytes(Context ctx) {
+        try {
+            StorageManager sm = (StorageManager) ctx.getSystemService(Context.STORAGE_SERVICE);
+            if (sm != null) return sm.getAllocatableBytes(StorageManager.UUID_DEFAULT);
+        } catch (Exception e) {
+            Log.w(TAG, "allocatableBytes failed", e);
+        }
+        return -1;
+    }
+
+    private static String spaceMessage(long need, long have, boolean both) {
+        long lack = Math.max(0, need - have);
+        return "Мало места: " + (both ? "для загрузки и установки" : "для установки") + " нужно около "
+                + mb(need) + " МБ, а система даёт " + mb(have) + " МБ. Освободите ещё примерно "
+                + mb(lack) + " МБ.";
+    }
+
+    private static String mb(long bytes) {
+        return String.valueOf(Math.round(bytes / 1048576.0));
+    }
+
+    /** Причина из DownloadManager (COLUMN_REASON) — человеческим текстом. */
+    private static String downloadError(int reason) {
+        switch (reason) {
+            case DownloadManager.ERROR_INSUFFICIENT_SPACE: return "мало места для загрузки";
+            case DownloadManager.ERROR_DEVICE_NOT_FOUND: return "внешнее хранилище недоступно";
+            case DownloadManager.ERROR_FILE_ALREADY_EXISTS: return "файл уже существует";
+            case DownloadManager.ERROR_FILE_ERROR: return "ошибка файла";
+            case DownloadManager.ERROR_HTTP_DATA_ERROR: return "обрыв связи при загрузке";
+            case DownloadManager.ERROR_TOO_MANY_REDIRECTS: return "слишком много перенаправлений";
+            case DownloadManager.ERROR_UNHANDLED_HTTP_CODE: return "сервер отклонил загрузку";
+            case DownloadManager.ERROR_CANNOT_RESUME: return "не удалось возобновить загрузку";
+            case DownloadManager.ERROR_UNKNOWN: return "неизвестная ошибка загрузки";
+            default: break;
+        }
+        // При HTTP-ошибке DownloadManager кладёт в reason код ответа (404, 403, ...)
+        if (reason >= 400 && reason < 600) return "сервер вернул " + reason;
+        return "ошибка загрузки (" + reason + ")";
+    }
+
+    /** Наши загрузки из DownloadManager (чужие он и не отдаёт): имя файла -> {id, статус, время}. */
+    private static Map<String, long[]> ourDownloads(DownloadManager dm) {
+        Map<String, long[]> out = new HashMap<>();
+        try (Cursor c = dm.query(new DownloadManager.Query())) {
+            if (c == null) return out;
+            int iTitle = c.getColumnIndex(DownloadManager.COLUMN_TITLE);
+            int iId = c.getColumnIndexOrThrow(DownloadManager.COLUMN_ID);
+            int iStatus = c.getColumnIndex(DownloadManager.COLUMN_STATUS);
+            int iMod = c.getColumnIndex(DownloadManager.COLUMN_LAST_MODIFIED_TIMESTAMP);
+            int iLocal = c.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI);
+            while (c.moveToNext()) {
+                String title = iTitle < 0 ? null : c.getString(iTitle);
+                String local = iLocal < 0 ? null : c.getString(iLocal);
+                String key = null;
+                if (local != null) {
+                    int slash = local.lastIndexOf('/');
+                    if (slash >= 0) key = local.substring(slash + 1);
+                }
+                if (key == null || !key.endsWith(".apk")) key = title;
+                if (key == null || !key.endsWith(".apk")) continue;
+                long[] v = {c.getLong(iId), iStatus < 0 ? -1 : c.getInt(iStatus), iMod < 0 ? 0 : c.getLong(iMod)};
+                long[] old = out.get(key);
+                if (old == null || v[0] > old[0]) out.put(key, v);   // свежайшая запись
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "cannot list downloads", e);
+        }
+        return out;
+    }
+
+    private static void cleanupOnce(Context ctx) {
+        if (sCleanedUp) return;
+        sCleanedUp = true;
+        try {
+            cleanupDownloads(ctx);
+        } catch (Exception e) {
+            Log.w(TAG, "cleanup downloads failed", e);
+        }
+    }
+
+    /**
+     * Убрать мусор от прерванных установок: скачанные APK, которые уже никто не ждёт, и
+     * записи DownloadManager без файла. Процесс может умереть между загрузкой и установкой,
+     * а такой файл на забитом диске — это сотни мегабайт (видели 161 МБ от старой Альфы).
+     */
+    static void cleanupDownloads(Context ctx) {
+        DownloadManager dm = (DownloadManager) ctx.getSystemService(Context.DOWNLOAD_SERVICE);
+        File dir = ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+        if (dir == null) return;
+        Map<String, long[]> rows = dm == null ? new HashMap<>() : ourDownloads(dm);
+        long now = System.currentTimeMillis();
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File f : files) {
+                String name = f.getName();
+                if (!name.endsWith(".apk")) continue;
+                if (f.equals(sPendingApk)) continue;   // ждёт выдачи разрешения на установку
+                long[] row = rows.remove(name);
+                if (row != null) {
+                    int st = (int) row[1];
+                    if (st == DownloadManager.STATUS_RUNNING || st == DownloadManager.STATUS_PENDING
+                            || st == DownloadManager.STATUS_PAUSED) continue;   // ещё качается
+                }
+                if (now - f.lastModified() < KEEP_DOWNLOAD_MS) continue;   // свежий — вдруг нужен
+                Log.d(TAG, "cleanup stale apk " + name + " = " + f.length() + " bytes");
+                if (row != null && dm != null) { try { dm.remove(row[0]); } catch (Exception ignored) {} }
+                // dm.remove удаляет файл не всегда (а если запись уже пропала — вообще ничего
+                // не делает), поэтому подчищаем сами: смысл чистки именно в освобождении места.
+                Log.d(TAG, "cleanup delete " + name + ": " + f.delete());
+            }
+        }
+        // Записи без файла (файл удалён после установки) — чтобы не копились в DownloadManager.
+        for (Map.Entry<String, long[]> e : rows.entrySet()) {
+            long[] row = e.getValue();
+            int st = (int) row[1];
+            if (st == DownloadManager.STATUS_RUNNING || st == DownloadManager.STATUS_PENDING
+                    || st == DownloadManager.STATUS_PAUSED) continue;
+            if (now - row[2] < KEEP_DOWNLOAD_MS) continue;
+            Log.d(TAG, "cleanup stale download row " + e.getKey());
+            if (dm != null) { try { dm.remove(row[0]); } catch (Exception ignored) {} }
+        }
     }
 
     private static void launchInstaller(Activity a, File apk) {
@@ -207,10 +410,11 @@ public final class ApkInstaller {
     /**
      * Установка через PackageInstaller-сессию: копируем APK в сессию и получаем
      * колбэк статуса (успех/отмена/ошибка).
-     * true - обработано (или ждём разрешения/возврата в foreground);
-     * false - вызывающий откатится на ACTION_VIEW.
+     * COMMIT_OK - сессия создана (файл APK уже удалён);
+     * COMMIT_PENDING - ждём разрешения/возврата в foreground (файл надо сохранить);
+     * COMMIT_FALLBACK - сессия не удалась, вызывающий откатится на ACTION_VIEW.
      */
-    private static boolean commitSession(Activity a, WebView webview, File apk) {
+    private static int commitSession(Activity a, WebView webview, File apk) {
         boolean needPerm = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 && !a.getPackageManager().canRequestPackageInstalls();
         if (needPerm) {
@@ -221,7 +425,7 @@ public final class ApkInstaller {
             sPermScreenShown = false;   // для этого APK экран настроек ещё не показывали
             emit(webview, phase("permission"));
             if (MainActivity.sVisible) openInstallSettings(a);
-            return true;
+            return COMMIT_PENDING;
         }
         // Свёрнуто → Android блокирует запуск CONFIRM_INSTALL из фона
         // (Background activity launch blocked): диалог не появится, установка «зависнет».
@@ -231,7 +435,7 @@ public final class ApkInstaller {
             sPendingActivity = new WeakReference<>(a);
             sPendingWebview = new WeakReference<>(webview);
             emit(webview, phase("pending"));
-            return true;
+            return COMMIT_PENDING;
         }
         sPendingApk = null;
         try {
@@ -259,10 +463,10 @@ public final class ApkInstaller {
                 Log.d(TAG, "session " + id + " committed");
             }
             apk.delete();
-            return true;
+            return COMMIT_OK;
         } catch (Exception e) {
             Log.e(TAG, "PackageInstaller session failed, fallback to ACTION_VIEW", e);
-            return false;
+            return COMMIT_FALLBACK;
         }
     }
 
@@ -309,11 +513,11 @@ public final class ApkInstaller {
         if (act == null || wv == null) return;
         new Thread(() -> {
             sWebview = new WeakReference<>(wv);
-            boolean session = commitSession(act, wv, apk);
+            int res = commitSession(act, wv, apk);
             JSONObject d = phase("done");
-            try { d.put("session", session); } catch (Exception ignored) {}
+            try { d.put("session", res != COMMIT_FALLBACK); } catch (Exception ignored) {}
             emit(wv, d);
-            if (!session) launchInstaller(act, apk);
+            if (res == COMMIT_FALLBACK) launchInstaller(act, apk);
         }, "apk-installer-retry").start();
     }
 
