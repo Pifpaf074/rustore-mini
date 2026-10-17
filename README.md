@@ -28,11 +28,11 @@ GitHub Releases (`release.sh` публикует APK и `version.json`).
 Нужен только `git` — JDK 17 и Android SDK `make.sh` скачает сам.
 
 ```bash
-git clone https://github.com/Jipok/web-to-app      /work/4   # апстрим-обёртка
+git clone https://github.com/Jipok/website-to-apk   /work/5   # апстрим-обёртка
 git clone https://github.com/Pifpaf074/rustore-mini /work/rustore-mini
-/work/rustore-mini/native/apply.sh /work/4                   # наложить наш слой
-cd /work/4 && ./make.sh build confs/rustore/webapk.conf      # релиз: UI вшит в APK
-# → /work/4/rustore.apk
+/work/rustore-mini/native/apply.sh /work/5                    # наложить наш слой
+cd /work/5 && ./make.sh build confs/rustore/webapk.conf       # релиз: UI вшит в APK
+# → /work/5/rustore.apk
 ```
 
 `apply.sh` кладёт в дерево сборки конфиги, web-UI и нативные мосты. Если в дереве
@@ -42,7 +42,7 @@ cd /work/4 && ./make.sh build confs/rustore/webapk.conf      # релиз: UI в
 Dev-сборка — UI тянется с сервера, правки видны без пересборки APK:
 
 ```bash
-cd /work/4 && ./make.sh build confs/rustore-dev/webapk.conf
+cd /work/5 && ./make.sh build confs/rustore-dev/webapk.conf
 /work/rustore-mini/deploy.sh /work/rustore      # разложить web/* на сервер раздачи
 ```
 

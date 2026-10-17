@@ -19,7 +19,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 REPO="${REPO:-Pifpaf074/rustore-mini}"
-TREE="${TREE:-/work/4}"
+TREE="${TREE:-/work/5}"
 APK="${1:-}"
 CONF="$TREE/confs/rustore/webapk.conf"
 

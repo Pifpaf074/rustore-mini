@@ -1,7 +1,7 @@
 #!/bin/sh
-# Накладывает оверлей «RuStore mini» на свежий checkout web-to-app.
+# Накладывает оверлей «RuStore mini» на свежий checkout website-to-apk.
 #
-#   rustore-mini/native/apply.sh /work/4
+#   rustore-mini/native/apply.sh /work/5
 #
 # Делает три вещи (идемпотентно, ничего не удаляет):
 #   1. git apply native/upstream-src.patch  — правки src/ + make.sh + default.conf
@@ -17,7 +17,7 @@ REPO=$(cd "$HERE/.." && pwd)
 ROOT=${1:-}
 
 [ -n "$ROOT" ] || { echo "usage: $0 <upstream-checkout>"; exit 2; }
-[ -d "$ROOT/src/java" ] || { echo "ошибка: $ROOT не похож на checkout web-to-app"; exit 2; }
+[ -d "$ROOT/src/java" ] || { echo "ошибка: $ROOT не похож на checkout website-to-apk"; exit 2; }
 [ -f "$ROOT/src/java/MainActivity.java" ] || { echo "ошибка: нет src/java/MainActivity.java"; exit 2; }
 
 echo "== 1/3 патч апстрима =="

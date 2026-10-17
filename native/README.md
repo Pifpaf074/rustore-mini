@@ -1,6 +1,6 @@
-# Нативное расширение форка («нашлёпка» на web-to-app)
+# Нативное расширение форка («нашлёпка» на website-to-apk)
 
-Апстрим (`Jipok/web-to-app`, рабочая копия — `/work/4`) **не принимает** наши
+Апстрим (`Jipok/website-to-apk`, рабочая копия — `/work/5`) **не принимает** наши
 нативные мосты (установка APK, список пакетов, Hail). Поэтому они живут только в
 форке. Здесь лежат каноничные копии и патч, чтобы не потерять их при обновлении
 апстрима.
@@ -23,8 +23,9 @@
    потеряла (`sUserAction`, см. ниже) — **с задержкой 4 с**, иначе после успешной
    установки показывался устаревший диалог («Не удалось установить приложение»).
 3. Инжект инсетов: `document.documentElement` может быть ещё `null` (инжект прилетает
-   до парсинга `<html>`) — вызов обёрнут в `(function(){var d=document.documentElement;if(!d)return;…})()`,
-   иначе на каждом холодном старте 3 × `Cannot read properties of null (reading 'style')`.
+   до парсинга `<html>`) — **апстрим починил это сам** (обёртка
+   `var root = document.documentElement; if (root) {…}`), поэтому этого хунка в нашем
+   патче больше нет.
 4. `@JavascriptInterface`-методы: `installApk`, `getInstalledApps`, `isPackageInstalled`,
    `getInstalledVersion`, `getInstalledSigner`, `getAppIcon`, `hailAvailable`, `hailAction`,
    `openAppInfo`, `launchApp`, `getAppInfo`, `getDeviceInfo`, `openExternal`.
@@ -102,6 +103,11 @@ managePackages = true
 
 ## Переход на свежий апстрим
 
+Текущее дерево сборки — **`/work/5`** (`website-to-apk`, HEAD `d2238cc`, 17.10.2026);
+предыдущее `/work/4` (`web-to-app`) оставлено как есть. Переезд 17.10.2026 прошёл
+без сюрпризов: патч пришлось перегенерировать (апстрим сам починил инсет-баг, хунк
+выкинут), остальные точки интеграции легли как есть.
+
 1. Взять свежий checkout и **заменить ключ подписи на наш** (в checkout'е лежит ключ
    апстрима — иначе самообновление не встанет):
    `cp my-release-key.jks my-release-key.upstream.jks.bak && cp <наш>.jks my-release-key.jks`.
@@ -126,7 +132,7 @@ managePackages = true
 ## Сборка
 
 ```bash
-cd /work/4
+cd /work/5
 ./make.sh build confs/rustore/webapk.conf       # релиз: сайт вшит (site = site)
 ./make.sh build confs/rustore-dev/webapk.conf   # dev: UI с сервера раздачи
 ```
@@ -134,7 +140,15 @@ cd /work/4
 Каноничные конфиги — в `../confs/`. Сайт для релиза синхронизируется из `../web/`:
 
 ```bash
-rsync -a --delete /work/rustore-mini/web/ /work/4/confs/rustore/site/
+rsync -a --delete /work/rustore-mini/web/ /work/5/confs/rustore/site/
+```
+
+Сборка требует JDK 17 и Android SDK. `make.sh` ставит их сам (`./make.sh get_java`,
+`get_tools`); SDK кладётся в `<дерево>/cmdline-tools/` — в `/work/5` он подключён
+симлинком на `/work/4/cmdline-tools`, чтобы не качать заново.
+
+```bash
+cd /work/5 && JAVA_HOME=/usr/lib/jvm/openjdk17 ./make.sh build confs/rustore/webapk.conf
 ```
 
 ## Подпись
@@ -142,14 +156,14 @@ rsync -a --delete /work/rustore-mini/web/ /work/4/confs/rustore/site/
 Релиз обязан быть подписан ключом пользователя
 (`db90782f6ffe0f4cdd1af0c019f2d48e2275e63abf070a582415733973e026c2`), иначе
 обновление поверх установленной «RuStore mini» не встанет. Ключ лежит в
-`/work/4/my-release-key.jks` (копия старого ключа; форк `website-to-apk`, откуда он
-взят, удалён);
-исходный ключ апстрима сохранён как `/work/4/my-release-key.webtoapp.jks.bak`.
+`/work/5/my-release-key.jks` (копия старого ключа; форк `website-to-apk`, откуда он
+взят, удалён); исходный ключ апстрима сохранён как
+`/work/4/my-release-key.webtoapp.jks.bak`.
 
 ## Пожелания апстриму
 
-- **Баг:** инжект инсетов падает до парсинга `<html>` — 3 × `Cannot read properties of
-  null (reading 'style')` в консоли на каждом холодном старте (лечится guard'ом, см. выше).
+- **Баг (апстрим починил):** инжект инсетов падал до парсинга `<html>` — 3 ×
+  `Cannot read properties of null (reading 'style')` на каждом холодном старте.
 - **Баг:** потерянный интент подтверждения установки (`STATUS_PENDING_USER_ACTION`)
   навсегда вешает установку — нужен повторный запуск из `onResume` (и, что важнее,
   с задержкой: см. выше).

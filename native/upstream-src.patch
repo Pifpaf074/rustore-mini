@@ -11,7 +11,7 @@
 \ No newline at end of file
 --- a/make.sh
 +++ b/make.sh
-@@ -123,6 +123,11 @@
+@@ -124,6 +124,11 @@
              update_permission "android.permission.RECORD_AUDIO" "$new_value"
              update_permission "android.permission.MODIFY_AUDIO_SETTINGS" "$new_value"
              ;;
@@ -38,7 +38,7 @@
  </manifest>
 --- a/src/java/MainActivity.java
 +++ b/src/java/MainActivity.java
-@@ -180,8 +180,14 @@
+@@ -186,8 +186,14 @@
      boolean geolocationEnabled = false;
      boolean cameraEnabled = false;
      boolean microphoneEnabled = false;
@@ -53,52 +53,12 @@
      // Local site (config key `site`), served from assets over a virtual https origin
      private static final String LOCAL_SITE_DOMAIN = "app.local";
      private static final String LOCAL_SITE_URL = "https://" + LOCAL_SITE_DOMAIN + "/";
-@@ -431,12 +437,16 @@
-             // Pass insets to WebView via CSS custom properties.
-             // These names are chosen to be close to the standard CSS env() variables.
-             // The web content can then use var(--safe-area-inset-top).
-+            // document.documentElement может быть ещё null (инжект прилетает до парсинга
-+            // <html>, а onPageFinished повторяет его) — иначе 3 x
-+            // "Cannot read properties of null (reading 'style')" в консоли на каждом старте.
-             String js = String.format(java.util.Locale.US,
--                "document.documentElement.style.setProperty('--safe-area-inset-top', '%.2fpx');" +
--                "document.documentElement.style.setProperty('--safe-area-inset-bottom', '%.2fpx');" +
--                "document.documentElement.style.setProperty('--safe-area-inset-left', '%.2fpx');" +
--                "document.documentElement.style.setProperty('--safe-area-inset-right', '%.2fpx');" +
--                "document.dispatchEvent(new CustomEvent('WebToApkInsetsApplied'));",
-+                "(function(){var d=document.documentElement;if(!d)return;" +
-+                "d.style.setProperty('--safe-area-inset-top', '%.2fpx');" +
-+                "d.style.setProperty('--safe-area-inset-bottom', '%.2fpx');" +
-+                "d.style.setProperty('--safe-area-inset-left', '%.2fpx');" +
-+                "d.style.setProperty('--safe-area-inset-right', '%.2fpx');" +
-+                "document.dispatchEvent(new CustomEvent('WebToApkInsetsApplied'));})()",
-                 top, bottom, left, right
-             );
-             webview.evaluateJavascript(js, null);
-@@ -671,25 +681,19 @@
-         if (webview != null) webview.saveState(outState);
+@@ -752,6 +758,21 @@
+         }
      }
  
--    // TODO idk what do with this. rly need?
--    // @Override
--    // protected void onPause() {
--    //     super.onPause();
--    //     Log.d("WebToApk", "onPause");
--    //     if (webview != null) {
--    //         Log.d("WebToApk", "onPause 2");
--    //         webview.onPause();
--    //     }
--    // }
--    // @Override
--    // protected void onResume() {
--    //     super.onResume();
--    //     Log.d("WebToApk", "onResume");
--    //     if (webview != null) {
--    //         Log.d("WebToApk", "onResume 2");
--    //         webview.onResume();
--    //     }
--    // }
 +    // Отслеживаем видимость (для отложенной установки) и докоммитим pending при возврате.
++    // Сам WebView по-прежнему не ставим на паузу — см. комментарий ниже.
 +    @Override
 +    protected void onResume() {
 +        super.onResume();
@@ -111,10 +71,11 @@
 +        super.onPause();
 +        sVisible = false;
 +    }
- 
-     /* DownloadManager writes into the public Downloads directory, so before API 29 the enqueue is
-        preceded by a WRITE_EXTERNAL_STORAGE round-trip (see onRequestPermissionsResult) */
-@@ -1716,6 +1720,91 @@
++
+     // Save the state of the WebView (current URL, history, scroll position) during OOM kill
+     @Override
+     protected void onSaveInstanceState(@NonNull Bundle outState) {
+@@ -1887,6 +1908,91 @@
              }
          }
  
@@ -205,4 +166,4 @@
 +
          @JavascriptInterface
          public void showShortToast(String message) {
-             uiHandler.post(new Runnable() {
+             uiHandler.post(() -> Toast.makeText(context, message, Toast.LENGTH_SHORT).show());
