@@ -73,7 +73,6 @@ MIRROR_DIR=/work/rustore ./release.sh     # собрать и опубликов
 | `native/` | нативная часть форка: `ApkInstaller`, `InstallResultReceiver`, `apply.sh`, патч |
 | `rustore.py` | CLI к API RuStore: `search`, `info`, `url`, `download`, `trends`, `comments` |
 | `tests/` | headless-тесты UI (chromium + CDP) |
-| `docs/` | `api.md` — разбор API, `hail.md` — Hail, `alternatives.md` — другие варианты |
 | `deploy.sh` | выкладка `web/*` на сервер раздачи (только для dev-сборки) |
 | `release.sh` | сборка + публикация релиза на GitHub Releases (автообновление) |
 
@@ -86,12 +85,8 @@ python3 rustore.py download com.one.tap.flashlight -o downloads
 
 ## Документация
 
-- [`docs/api.md`](docs/api.md) — ручки RuStore, правила `ruStoreVerCode`, CORS, TLS
-  картинок, curl-доказательства.
 - [`native/README.md`](native/README.md) — что мы дописали в апстрим и зачем.
-- [`docs/hail.md`](docs/hail.md) — заморозка приложений через Hail.
 - [`tests/README.md`](tests/README.md) — как гонять headless-тесты.
-- [`docs/alternatives.md`](docs/alternatives.md) — как ещё можно было сделать.
 
 ## Оговорки
 
@@ -99,4 +94,4 @@ API RuStore неофициальный — это reverse engineering, а не �
 без предупреждения. Платные приложения напрямую не скачиваются; у части приложений
 APK отдаёт внешний источник (`aggregatorInfo`) — тогда прямой ссылки нет.
 Скачивание APK сторонних приложений — вопрос лицензий, для личного использования
-обычно ок. Подробности — в [`docs/api.md`](docs/api.md).
+обычно ок.
